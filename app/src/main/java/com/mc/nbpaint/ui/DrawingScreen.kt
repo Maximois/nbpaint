@@ -1236,17 +1236,20 @@ fun LayersSheet(viewModel: DrawingViewModel) {
         Spacer(Modifier.height(8.dp))
 
         // La capa superior se muestra primero, como en los editores de imagen.
-        val ordered = viewModel.layers.indices.reversed()
+        //
+        // La lista se arma con los ids y no con las posiciones: al combinar o borrar una
+        // capa la lista pierde un elemento, y si la clave de cada fila se buscara por
+        // posición Compose pediría un índice que ya no existe y la app cerraría.
+        val orderedIds = viewModel.layers.indices.reversed().map { viewModel.layers[it].id }
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(6.dp),
             modifier = Modifier.height(268.dp)
         ) {
-            items(ordered.toList(), key = { viewModel.layers[it].id }) { index ->
+            items(orderedIds, key = { it }) { layerId ->
                 LayerItem(
                     viewModel = viewModel,
-                    index = index,
-                    isSelected = viewModel.activeLayerIndex == index,
-                    onSelect = { viewModel.selectLayer(index) }
+                    layerId = layerId,
+                    isSelected = viewModel.activeLayerIndex == viewModel.indexOfLayer(layerId)
                 )
             }
         }
@@ -1256,12 +1259,21 @@ fun LayersSheet(viewModel: DrawingViewModel) {
 @Composable
 private fun LayerItem(
     viewModel: DrawingViewModel,
-    index: Int,
-    isSelected: Boolean,
-    onSelect: () -> Unit
+    layerId: Int,
+    isSelected: Boolean
 ) {
+    // Todo se busca por id y se resuelve la posición recién al actuar. Si la fila quedó
+    // vieja porque otra capa se combinó o se borró, la posición ya no sirve.
+    val index = viewModel.indexOfLayer(layerId)
+    if (index < 0) return
     val layer = viewModel.layers[index]
-    var renaming by remember { mutableStateOf(false) }
+    var renaming by remember(layerId) { mutableStateOf(false) }
+
+    // Si la capa sigue existiendo, le aplica la acción; si ya no, no hace nada.
+    fun onLayer(action: (Int) -> Unit) {
+        val current = viewModel.indexOfLayer(layerId)
+        if (current >= 0) action(current)
+    }
 
     Column(
         modifier = Modifier
@@ -1273,11 +1285,11 @@ private fun LayerItem(
                 color = if (isSelected) NbAccent else Color.Transparent,
                 shape = RoundedCornerShape(12.dp)
             )
-            .clickable(onClick = onSelect)
+            .clickable { onLayer { viewModel.selectLayer(it) } }
             .padding(horizontal = 8.dp, vertical = 6.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = { viewModel.toggleLayerVisibility(index) }) {
+            IconButton(onClick = { onLayer { viewModel.toggleLayerVisibility(it) } }) {
                 Icon(
                     imageVector = if (layer.visible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
                     contentDescription = "Visibilidad",
@@ -1291,7 +1303,7 @@ private fun LayerItem(
                     initialName = layer.name,
                     onDismiss = { renaming = false },
                     onConfirm = { newName ->
-                        viewModel.renameLayer(index, newName)
+                        onLayer { viewModel.renameLayer(it, newName) }
                         renaming = false
                     }
                 )
@@ -1306,7 +1318,10 @@ private fun LayerItem(
                 )
             }
 
-            IconButton(onClick = { viewModel.moveLayerUp(index) }, enabled = index < viewModel.layers.lastIndex) {
+            IconButton(
+                onClick = { onLayer { viewModel.moveLayerUp(it) } },
+                enabled = index < viewModel.layers.lastIndex
+            ) {
                 Icon(
                     Icons.Default.KeyboardArrowUp,
                     contentDescription = "Subir capa",
@@ -1314,7 +1329,10 @@ private fun LayerItem(
                     modifier = Modifier.size(20.dp)
                 )
             }
-            IconButton(onClick = { viewModel.moveLayerDown(index) }, enabled = index > 0) {
+            IconButton(
+                onClick = { onLayer { viewModel.moveLayerDown(it) } },
+                enabled = index > 0
+            ) {
                 Icon(
                     Icons.Default.KeyboardArrowDown,
                     contentDescription = "Bajar capa",
@@ -1323,7 +1341,7 @@ private fun LayerItem(
                 )
             }
             IconButton(
-                onClick = { viewModel.mergeDown(index) },
+                onClick = { onLayer { viewModel.mergeDown(it) } },
                 enabled = index > 0
             ) {
                 Icon(
@@ -1334,7 +1352,7 @@ private fun LayerItem(
                 )
             }
             IconButton(
-                onClick = { viewModel.removeLayer(index) },
+                onClick = { onLayer { viewModel.removeLayer(it) } },
                 enabled = viewModel.layers.size > 1
             ) {
                 Icon(
@@ -1357,7 +1375,7 @@ private fun LayerItem(
             )
             Slider(
                 value = layer.opacity,
-                onValueChange = { viewModel.setLayerOpacity(index, it) },
+                onValueChange = { value -> onLayer { viewModel.setLayerOpacity(it, value) } },
                 valueRange = 0f..1f,
                 modifier = Modifier.weight(1f),
                 colors = SliderDefaults.colors(

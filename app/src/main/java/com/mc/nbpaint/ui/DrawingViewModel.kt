@@ -316,6 +316,13 @@ class DrawingViewModel : ViewModel() {
     private fun activeLayer(): PaintLayer? = layers.getOrNull(activeLayerIndex)
     private fun activeCanvas(): Canvas? = activeLayer()?.let { Canvas(it.bitmap) }
 
+    /**
+     * Posición actual de una capa por su id, o -1 si ya no existe. La interfaz lo usa
+     * para no guardar posiciones viejas: si las capas cambian mientras se dibuja la
+     * lista, el índice que se capturó antes puede apuntar a otra capa o no existir.
+     */
+    fun indexOfLayer(id: Int): Int = layers.indexOfFirst { it.id == id }
+
     // ---- Selección de herramienta y estilo --------------------------------
 
     fun selectTool(tool: PaintTool) {

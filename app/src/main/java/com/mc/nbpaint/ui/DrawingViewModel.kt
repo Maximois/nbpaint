@@ -54,6 +54,12 @@ private const val AUTOSAVE_DIR_NAME = "nbpaint_autosaves"
 /** Cuántos puntos de autoguardado se conservan. */
 private const val MAX_AUTOSAVES = 5
 
+/**
+ * Archivo dentro de la carpeta de autoguardados que dice "había trabajo sin terminar".
+ * Solo se borra cuando el usuario cierra la app o el proyecto a propósito.
+ */
+private const val SESSION_MARKER = ".sesion_abierta"
+
 enum class ExportFormat { PNG, JPEG }
 
 /** Una capa del lienzo: bitmap propio, visibilidad y opacidad. `id` es estable entre operaciones. */
@@ -250,6 +256,12 @@ class DrawingViewModel : ViewModel() {
      */
     fun initDocument(width: Int, height: Int) {
         if (width <= 0 || height <= 0) return
+        if (viewportWidth <= 0 || viewportHeight <= 0) {
+            // El primer tamaño medido del visor sirve de hoja por defecto para los
+            // proyectos nuevos, así "cerrar proyecto" no depende de cómo esté la pantalla.
+            viewportWidth = width
+            viewportHeight = height
+        }
         if (layers.isNotEmpty()) return
 
         canvasWidth = width
@@ -261,6 +273,38 @@ class DrawingViewModel : ViewModel() {
         compositeBitmap = null
         revision++
     }
+
+    /**
+     * Cierra el proyecto actual: deja una hoja nueva en blanco y suelta el historial de
+     * deshacer, para poder abrir otro proyecto sin que quede pegado lo anterior.
+     */
+    fun nuevoProyecto(context: Context) {
+        viewModelScope.launch {
+            val width = viewportWidth.coerceAtLeast(1)
+            val height = viewportHeight.coerceAtLeast(1)
+            layers.clear()
+            val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            Canvas(bmp).drawColor(CANVAS_BACKGROUND)
+            layers.add(PaintLayer(nextId(), bmp, nextLayerName()))
+            canvasWidth = width
+            canvasHeight = height
+            activeLayerIndex = 0
+            undoStack.clear()
+            redoStack.clear()
+            canUndo = false
+            canRedo = false
+            compositeBitmap = null
+            lastAutosavedSignature = null
+            lastAutosavedSlot = null
+            // La sesión vieja ya no está en curso: si la app muere ahora, la próxima abre limpia.
+            closeSession(context)
+            revision++
+            _messages.emit("Proyecto cerrado")
+        }
+    }
+
+    private var viewportWidth = 0
+    private var viewportHeight = 0
 
     private fun nextId(): Int = idCounter++
     private var layerCounter = 0
@@ -895,34 +939,123 @@ class DrawingViewModel : ViewModel() {
     }
 
     /**
-     * Autoguardado: escribe una copia fechada del estado actual y conserva las últimas
+     * Autoguardado: escribe una copia del estado actual y conserva las últimas
      * [MAX_AUTOSAVES] para poder volver a cualquiera. Se dispara al dejar de estar en
      * primer plano, que es cuando el sistema puede matar el proceso.
+     *
+     * Si no se cambió nada desde el último autoguardado no se escribe otro: abrir y cerrar
+     * la app sin dibujar llenaría el historial de copias idénticas.
      */
     fun autosave(context: Context) {
         if (layers.isEmpty()) return
         if (layers.none { layerHasContent(it) }) return
+
+        val signature = autosaveSignature()
+        if (signature == lastAutosavedSignature) {
+            // No hay nada nuevo, pero la sesión sigue abierta: se refresca el marcador
+            // para que si la app muere más adelante se pueda recuperar lo último.
+            markSessionOpen(context, lastAutosavedSlot)
+            return
+        }
+        lastAutosavedSignature = signature
+
         val snapshot = currentSnapshot()
         val width = canvasWidth
         val height = canvasHeight
         val activeIndex = activeLayerIndex
         viewModelScope.launch {
-            withContext(Dispatchers.IO) {
+            val slot = withContext(Dispatchers.IO) {
                 val root = File(context.filesDir, AUTOSAVE_DIR_NAME)
                 if (!root.exists()) root.mkdirs()
                 // Se numera a partir de las carpetas que ya hay, así el más reciente queda
                 // al final y se puede mostrar como historial.
                 val used = root.listFiles()?.filter { it.isDirectory }?.mapNotNull { it.name.toIntOrNull() }?.toMutableSet() ?: mutableSetOf()
-                var slot = 1
-                while (slot in used) slot++
-                writeProjectTo(File(root, slot.toString()), snapshot, width, height, activeIndex)
-                used.add(slot)
+                var next = 1
+                while (next in used) next++
+                writeProjectTo(File(root, next.toString()), snapshot, width, height, activeIndex)
+                used.add(next)
                 // Se descartan las más viejas.
-                used.sorted().take(0.coerceAtLeast(used.size - MAX_AUTOSAVES)).forEach { old ->
+                used.sorted().take((used.size - MAX_AUTOSAVES).coerceAtLeast(0)).forEach { old ->
                     File(root, old.toString()).deleteRecursively()
                     used.remove(old)
                 }
+                next
             }
+            lastAutosavedSlot = slot
+            markSessionOpen(context, slot)
+        }
+    }
+
+    /**
+     * Huella del estado del lienzo. Si dos veces seguidas coincide, no se guarda de nuevo.
+     * Incluye el contador de revisiones del motor, que cambia con cada trazo, filtro o
+     * cambio de capa.
+     */
+    private fun autosaveSignature(): String {
+        val names = layers.joinToString(";") { "${it.name}:${it.visible}:${it.opacity}" }
+        return "$canvasWidth x $canvasHeight | activo=$activeLayerIndex | $names | rev=$revision"
+    }
+
+    private var lastAutosavedSignature: String? = null
+    private var lastAutosavedSlot: Int? = null
+
+    // ---- Sesión en curso -------------------------------------------------------
+    //
+    // Android destruye la pantalla (y con ella el ViewModel) cuando apaga la pantalla o
+    // aprieta la memoria, aunque el proceso siga vivo, y también mata el proceso entero
+    // en segundo plano. En los dos casos lo que había en el lienzo se pierde y el usuario
+    // vuelve a un Hoja en blanco. Para eso está el marcador: si existe, la app se cerró
+    // sola y lo último se recupera al abrir. Si el usuario cerró la app a propósito, el
+    // marcador se borra y la próxima vez arranca limpio, con el historial a mano.
+
+    private fun markSessionOpen(context: Context, slot: Int?) {
+        if (slot == null) return
+        val root = File(context.filesDir, AUTOSAVE_DIR_NAME)
+        if (!root.exists()) root.mkdirs()
+        File(root, SESSION_MARKER).writeText(slot.toString())
+    }
+
+    /** Llamado cuando el usuario cierra la app a propósito: la próxima vez abre limpio. */
+    fun closeSession(context: Context) {
+        File(File(context.filesDir, AUTOSAVE_DIR_NAME), SESSION_MARKER).delete()
+        lastAutosavedSignature = null
+        lastAutosavedSlot = null
+    }
+
+    /**
+     * Recupera lo último solo si la app se cerró sola. Si el usuario la cerró a propósito
+     * no se toca nada: abre en blanco y el historial queda disponible desde el menú.
+     */
+    fun restoreSessionIfInterrupted(context: Context) {
+        val marker = File(File(context.filesDir, AUTOSAVE_DIR_NAME), SESSION_MARKER)
+        if (!marker.exists()) return
+        val slot = marker.readText().trim().toIntOrNull()
+        if (slot == null || !File(File(File(context.filesDir, AUTOSAVE_DIR_NAME), slot.toString()), PROJECT_MANIFEST).exists()) {
+            marker.delete()
+            return
+        }
+        lastAutosavedSlot = slot
+        restoreAutosave(context, slot)
+    }
+
+    /** Borra un punto concreto del historial de autoguardado. */
+    fun deleteAutosave(context: Context, slot: Int) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                File(File(context.filesDir, AUTOSAVE_DIR_NAME), slot.toString()).deleteRecursively()
+            }
+            // Si el usuario ya no tiene historial, el próximo autoguardado tiene que rehacerlo.
+            lastAutosavedSignature = null
+        }
+    }
+
+    /** Borra todo el historial de autoguardado. */
+    fun clearAutosaves(context: Context) {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                File(context.filesDir, AUTOSAVE_DIR_NAME).deleteRecursively()
+            }
+            lastAutosavedSignature = null
         }
     }
 

@@ -1,5 +1,6 @@
 package com.mc.nbpaint.ui
 
+import android.app.Activity
 import android.graphics.Color as AndroidColor
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.expandVertically
@@ -51,6 +52,7 @@ import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Brush as BrushIcon
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.CropSquare
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FormatColorFill
@@ -167,15 +169,25 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
     }
 
     // Autoguardado: la app puede morir en cualquier momento (el sistema mata procesos en
-    // segundo plano), así que se guarda cada vez que deja de estar en primer plano. No se
-    // restaura solo al abrir: el usuario elige qué versión recuperar del historial.
+    // segundo plano), así que se guarda cada vez que deja de estar en primer plano. Al
+    // volver se recupera solo únicamente si la app se cerró sola; si la cerraste con la
+    // tecla atrás, la próxima abre en blanco y el historial queda a mano en el menú.
     val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_STOP) viewModel.autosave(context)
         }
         lifecycleOwner.lifecycle.addObserver(observer)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            // isFinishing solo es true si el usuario cerró la app; si el sistema la destruyó
+            // para liberar memoria, el marcador sobrevive y el trabajo se recupera.
+            if ((context as? Activity)?.isFinishing == true) viewModel.closeSession(context)
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.restoreSessionIfInterrupted(context)
     }
 
     var panZoomMode by remember { mutableStateOf(false) }
@@ -261,6 +273,13 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
                             onClick = {
                                 overflowMenuExpanded = false
                                 filterSheetVisible = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Cerrar proyecto") },
+                            onClick = {
+                                overflowMenuExpanded = false
+                                viewModel.nuevoProyecto(context)
                             }
                         )
                         DropdownMenuItem(
@@ -366,11 +385,21 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
     }
 
     if (autosaveMenuVisible) {
+        // Se relee al abrir y después de cada borrado para que la lista no quede vieja.
+        var slots by remember(autosaveMenuVisible) { mutableStateOf(viewModel.autosaveSlots(context)) }
         AutosaveSheet(
-            slots = viewModel.autosaveSlots(context),
+            slots = slots,
             onRestore = { slot ->
                 viewModel.restoreAutosave(context, slot)
                 autosaveMenuVisible = false
+            },
+            onDelete = { slot ->
+                viewModel.deleteAutosave(context, slot)
+                slots = viewModel.autosaveSlots(context).filterNot { it == slot }
+            },
+            onDeleteAll = {
+                viewModel.clearAutosaves(context)
+                slots = emptyList()
             },
             onDismiss = { autosaveMenuVisible = false }
         )
@@ -942,6 +971,8 @@ fun FilterSheet(viewModel: DrawingViewModel, onDismiss: () -> Unit) {
 fun AutosaveSheet(
     slots: List<Int>,
     onRestore: (Int) -> Unit,
+    onDelete: (Int) -> Unit,
+    onDeleteAll: () -> Unit,
     onDismiss: () -> Unit
 ) {
     ModalBottomSheet(
@@ -954,16 +985,29 @@ fun AutosaveSheet(
                 .padding(horizontal = 20.dp)
                 .padding(bottom = 28.dp)
         ) {
-            Text(
-                text = "Trabajos guardados",
-                style = MaterialTheme.typography.titleMedium,
-                color = NbOnSurface
-            )
-            Text(
-                text = "Se guarda solo cada vez que salís de la app.",
-                style = MaterialTheme.typography.labelMedium,
-                color = NbOnSurfaceMuted
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = "Trabajos guardados",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = NbOnSurface
+                    )
+                    Text(
+                        text = "Se guarda solo al salir de la app, y solo si dibujaste algo.",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = NbOnSurfaceMuted
+                    )
+                }
+                if (slots.isNotEmpty()) {
+                    TextButton(onClick = onDeleteAll) {
+                        Text("Borrar todo", color = NbOnSurfaceMuted)
+                    }
+                }
+            }
             Spacer(Modifier.height(14.dp))
 
             if (slots.isEmpty()) {
@@ -981,7 +1025,7 @@ fun AutosaveSheet(
                             .clip(RoundedCornerShape(12.dp))
                             .background(NbSurfaceLight)
                             .clickable { onRestore(slot) }
-                            .padding(horizontal = 14.dp, vertical = 14.dp),
+                            .padding(start = 14.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Column(Modifier.weight(1f)) {
@@ -990,19 +1034,24 @@ fun AutosaveSheet(
                                 style = MaterialTheme.typography.bodyLarge,
                                 color = NbOnSurface
                             )
-                            if (index == 0) {
-                                Text(
-                                    text = "Autoguardado",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    color = NbOnSurfaceMuted
-                                )
-                            }
+                            Text(
+                                text = if (index == 0) "Autoguardado" else "Autoguardado anterior",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = NbOnSurfaceMuted
+                            )
                         }
                         Text(
                             text = "Restaurar",
                             style = MaterialTheme.typography.labelLarge,
                             color = NbAccent
                         )
+                        IconButton(onClick = { onDelete(slot) }) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "Borrar versión $slot",
+                                tint = NbOnSurfaceMuted
+                            )
+                        }
                     }
                 }
             }

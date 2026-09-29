@@ -6,6 +6,9 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -14,6 +17,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +33,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -44,6 +51,7 @@ import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Brush as BrushIcon
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.CropSquare
+import androidx.compose.material.icons.filled.AutoFixHigh
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FormatColorFill
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -54,10 +62,12 @@ import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Timeline
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material.icons.filled.ZoomOutMap
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -65,6 +75,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -79,6 +90,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -90,6 +102,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.drawscope.DrawScope
@@ -100,6 +113,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.text.font.FontWeight
@@ -128,6 +142,23 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
     var overflowMenuExpanded by remember { mutableStateOf(false) }
     var colorPickerVisible by remember { mutableStateOf(false) }
     var layersSheetVisible by remember { mutableStateOf(false) }
+    var filterSheetVisible by remember { mutableStateOf(false) }
+    var textDialogAnchor by remember { mutableStateOf<Offset?>(null) }
+
+    val imagePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) viewModel.importImage(context, uri)
+    }
+
+    // La herramienta Texto deja el punto en el motor; la UI reacciona abriendo el diálogo.
+    LaunchedEffect(viewModel.textAnchor) {
+        val anchor = viewModel.textAnchor
+        if (anchor != null) {
+            textDialogAnchor = anchor
+            viewModel.dismissTextAnchor()
+        }
+    }
 
     var panZoomMode by remember { mutableStateOf(false) }
     val view = rememberCanvasTransformState()
@@ -198,8 +229,24 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
                             expanded = overflowMenuExpanded,
                             onDismissRequest = { overflowMenuExpanded = false }
                         ) {
-                            DropdownMenuItem(
-                                text = { Text("Limpiar capa actual") },
+                        DropdownMenuItem(
+                            text = { Text("Importar imagen") },
+                            onClick = {
+                                overflowMenuExpanded = false
+                                imagePicker.launch(
+                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                )
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Filtros") },
+                            onClick = {
+                                overflowMenuExpanded = false
+                                filterSheetVisible = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Limpiar capa actual") },
                                 onClick = {
                                     overflowMenuExpanded = false
                                     viewModel.clearCanvas()
@@ -277,6 +324,24 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
         ) {
             LayersSheet(viewModel)
         }
+    }
+
+    if (filterSheetVisible) {
+        FilterSheet(
+            viewModel = viewModel,
+            onDismiss = { filterSheetVisible = false }
+        )
+    }
+
+    textDialogAnchor?.let { anchor ->
+        TextInputDialog(
+            initialColor = viewModel.currentColor,
+            onConfirm = { text, size, color ->
+                viewModel.commitText(anchor, text, size, color)
+                textDialogAnchor = null
+            },
+            onDismiss = { textDialogAnchor = null }
+        )
     }
 }
 
@@ -373,6 +438,9 @@ private fun BottomDock(
             Column {
                 ColorPaletteRow(viewModel, onOpenCustomColor = onOpenCustomColor)
                 StrokeWidthSlider(viewModel)
+                if (viewModel.currentTool == PaintTool.MAGIC_WAND) {
+                    MagicWandPanel(viewModel)
+                }
                 ToolBar(viewModel)
             }
         }
@@ -433,6 +501,18 @@ fun ToolBar(viewModel: DrawingViewModel) {
             isSelected = viewModel.currentTool == PaintTool.CIRCLE,
             onClick = { viewModel.selectTool(PaintTool.CIRCLE) }
         )
+        ToolButton(
+            icon = Icons.Default.AutoFixHigh,
+            contentDescription = PaintTool.MAGIC_WAND.label,
+            isSelected = viewModel.currentTool == PaintTool.MAGIC_WAND,
+            onClick = { viewModel.selectTool(PaintTool.MAGIC_WAND) }
+        )
+        ToolButton(
+            icon = Icons.Default.TextFields,
+            contentDescription = PaintTool.TEXT.label,
+            isSelected = viewModel.currentTool == PaintTool.TEXT,
+            onClick = { viewModel.selectTool(PaintTool.TEXT) }
+        )
 
         if (viewModel.currentTool == PaintTool.RECTANGLE || viewModel.currentTool == PaintTool.CIRCLE) {
             ToolButton(
@@ -441,6 +521,54 @@ fun ToolBar(viewModel: DrawingViewModel) {
                 isSelected = viewModel.shapeFilled,
                 onClick = viewModel::toggleShapeFilled
             )
+        }
+    }
+}
+
+/**
+ * Ajustes que solo aparecen con la varita mágica activa: qué tan amplia es la región y con
+ * qué se rellena. Se muestran acá y no en un diálogo para poder ajustarlos y usar la
+ * herramienta sin interrupciones.
+ */
+@Composable
+private fun MagicWandPanel(viewModel: DrawingViewModel) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(NbSurface)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = "Tolerancia ${viewModel.smartFillTolerance.toInt()}",
+                style = MaterialTheme.typography.labelSmall,
+                color = NbOnSurfaceMuted,
+                modifier = Modifier.width(96.dp)
+            )
+            Slider(
+                value = viewModel.smartFillTolerance,
+                onValueChange = { viewModel.setSmartFillTolerance(it.toInt()) },
+                valueRange = 0f..128f,
+                modifier = Modifier.weight(1f)
+            )
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SmartFillMode.entries.forEach { mode ->
+                val selected = viewModel.smartFillMode == mode
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (selected) NbAccent else NbSurfaceLight)
+                        .clickable { viewModel.smartFillMode = mode }
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = mode.label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (selected) NbOnSurface else NbOnSurfaceMuted
+                    )
+                }
+            }
         }
     }
 }
@@ -643,6 +771,96 @@ fun ColorPaletteRow(viewModel: DrawingViewModel, onOpenCustomColor: () -> Unit) 
     }
 }
 
+private const val FilterSheetColumns = 3
+private val FilterSheetGap = 8.dp
+private val FilterChipHeight = 40.dp
+
+private fun filterGridHeight(): Dp {
+    val rows = (ImageFilter.entries.size + FilterSheetColumns - 1) / FilterSheetColumns
+    return FilterChipHeight * rows + FilterSheetGap * (rows - 1)
+}
+
+/**
+ * Hoja de filtros. Sin vista previa: el filtro se ve a tamaño completo en el lienzo
+ * después de aplicarlo, y un preview aparte hacía que la hoja quedara tan alta que el
+ * botón de aplicar caía fuera de la pantalla. Si el resultado no convence, alcanza con
+ * deshacer.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun FilterSheet(viewModel: DrawingViewModel, onDismiss: () -> Unit) {
+    val layer = viewModel.layers.getOrNull(viewModel.activeLayerIndex)
+    var selected by remember { mutableStateOf(ImageFilter.BRIGHTNESS) }
+    var amount by remember { mutableFloatStateOf(0.5f) }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = NbSurface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp)
+        ) {
+            Text(
+                text = "Filtros sobre ${layer?.name ?: "la capa"}",
+                style = MaterialTheme.typography.titleMedium,
+                color = NbOnSurface
+            )
+            Spacer(Modifier.height(12.dp))
+
+            if (selected.hasAmount) {
+                Slider(
+                    value = amount,
+                    onValueChange = { amount = it },
+                    valueRange = 0f..1f
+                )
+            }
+
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(FilterSheetColumns),
+                modifier = Modifier.height(filterGridHeight()),
+                horizontalArrangement = Arrangement.spacedBy(FilterSheetGap),
+                verticalArrangement = Arrangement.spacedBy(FilterSheetGap)
+            ) {
+                items(ImageFilter.entries.size) { index ->
+                    val filter = ImageFilter.entries[index]
+                    val isSelected = filter == selected
+                    Column(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (isSelected) NbAccent else NbSurfaceLight)
+                            .clickable {
+                                selected = filter
+                                amount = 0.5f
+                            }
+                            .padding(vertical = 12.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            text = filter.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (isSelected) NbOnSurface else NbOnSurfaceMuted
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = {
+                    viewModel.applyFilter(selected, if (selected.hasAmount) amount else 0f)
+                    onDismiss()
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Aplicar ${selected.label.lowercase()}")
+            }
+        }
+    }
+}
+
 @Composable
 fun StrokeWidthSlider(viewModel: DrawingViewModel) {
     Column(
@@ -686,14 +904,14 @@ fun LayersSheet(viewModel: DrawingViewModel) {
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
-            .padding(bottom = 24.dp)
+            .padding(bottom = 16.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Capas", style = MaterialTheme.typography.titleLarge, color = NbOnSurface)
+            Text("Capas", style = MaterialTheme.typography.titleMedium, color = NbOnSurface)
             TextButton(onClick = viewModel::addLayer) {
                 Icon(Icons.Default.Add, contentDescription = null)
                 Spacer(Modifier.width(4.dp))
@@ -705,8 +923,8 @@ fun LayersSheet(viewModel: DrawingViewModel) {
         // La capa superior se muestra primero, como en los editores de imagen.
         val ordered = viewModel.layers.indices.reversed()
         LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.height(320.dp)
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.height(268.dp)
         ) {
             items(ordered.toList(), key = { viewModel.layers[it].id }) { index ->
                 LayerItem(
@@ -1020,3 +1238,76 @@ private fun HueSlider(hue: Float, onHueChange: (Float) -> Unit) {
 
 private fun horizontalFraction(x: Float, width: Int): Float =
     if (width == 0) 0f else (x / width).coerceIn(0f, 1f)
+
+/**
+ * Diálogo de texto. Se abre al tocar el lienzo con la herramienta Texto; el punto del toque
+ * queda como ancla y el texto se dibuja con la línea base ahí.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun TextInputDialog(
+    initialColor: Int,
+    onConfirm: (text: String, sizeSp: Float, colorArgb: Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    var text by remember { mutableStateOf("") }
+    var size by remember { mutableFloatStateOf(48f) }
+    var color by remember { mutableIntStateOf(initialColor) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Agregar texto") },
+        text = {
+            Column {
+                OutlinedTextField(
+                    value = text,
+                    onValueChange = { text = it },
+                    label = { Text("Texto") },
+                    singleLine = false,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "Tamaño ${size.toInt()}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NbOnSurfaceMuted
+                )
+                Slider(
+                    value = size,
+                    onValueChange = { size = it },
+                    valueRange = 12f..160f
+                )
+                Spacer(Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    listOf(0xFF000000, 0xFFFFFFFF, 0xFFE74C3C, 0xFFF1C40F, 0xFF2ECC71, 0xFF3498DB, 0xFF9B59B6)
+                        .forEach { argb ->
+                            Box(
+                                modifier = Modifier
+                                    .size(34.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(argb))
+                                    .border(
+                                        if (color == argb.toInt()) 3.dp else 1.dp,
+                                        if (color == argb.toInt()) NbAccentLight else NbSurfaceLight,
+                                        CircleShape
+                                    )
+                                    .clickable { color = argb.toInt() }
+                            )
+                        }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(text, size, color) },
+                enabled = text.isNotBlank()
+            ) { Text("Agregar") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancelar") }
+        }
+    )
+}

@@ -410,7 +410,9 @@ private fun BottomDock(
     viewModel: DrawingViewModel,
     onOpenCustomColor: () -> Unit
 ) {
-    var expanded by rememberSaveable { mutableStateOf(true) }
+    // Arranca contraído: al abrir se ve el lienzo completo y la barra compacta, sin
+    // paneles tapando el dibujo. Se despliega al tocar la barra.
+    var expanded by rememberSaveable { mutableStateOf(false) }
 
     Column(
         modifier = Modifier

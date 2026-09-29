@@ -118,9 +118,6 @@ import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
-private const val MIN_SCALE = 1f
-private const val MAX_SCALE = 6f
-
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
@@ -133,15 +130,9 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
     var layersSheetVisible by remember { mutableStateOf(false) }
 
     var panZoomMode by remember { mutableStateOf(false) }
-    val scale = remember { mutableFloatStateOf(1f) }
-    val pan = remember { mutableStateOf(Offset.Zero) }
+    val view = rememberCanvasTransformState()
 
-    fun resetZoom() {
-        scale.floatValue = 1f
-        pan.value = Offset.Zero
-    }
-
-    val isZoomed = scale.floatValue != 1f || pan.value != Offset.Zero
+    val isZoomed = view.isZoomed
 
     LaunchedEffect(viewModel.messages) {
         viewModel.messages.collect { snackbarHostState.showSnackbar(it) }
@@ -168,7 +159,7 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
                         )
                     }
                     if (isZoomed) {
-                        IconButton(onClick = ::resetZoom) {
+                        IconButton(onClick = view::reset) {
                             Icon(Icons.Filled.ZoomOutMap, contentDescription = "Restablecer zoom")
                         }
                     }
@@ -255,13 +246,8 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
             ) {
                 DrawingCanvas(
                     viewModel = viewModel,
+                    view = view,
                     panZoomMode = panZoomMode,
-                    scale = scale.floatValue,
-                    pan = pan.value,
-                    onScaleChange = { newScale ->
-                        scale.floatValue = newScale.coerceIn(MIN_SCALE, MAX_SCALE)
-                    },
-                    onPanChange = { newPan -> pan.value = newPan },
                     modifier = Modifier.fillMaxSize()
                 )
             }
@@ -486,58 +472,46 @@ private fun ToolButton(
 @Composable
 private fun DrawingCanvas(
     viewModel: DrawingViewModel,
+    view: CanvasTransformState,
     panZoomMode: Boolean,
-    scale: Float,
-    pan: Offset,
-    onScaleChange: (Float) -> Unit,
-    onPanChange: (Offset) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    fun toCanvasCoords(pointer: Offset): Offset = (pointer - pan) / scale
-
-    var lastCanvasPoint by remember { mutableStateOf(Offset.Zero) }
+    fun toCanvasCoords(pointer: Offset): Offset = (pointer - view.pan) / view.scale
 
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
             .background(NbBackground)
             .border(1.dp, NbSurfaceLight, RoundedCornerShape(16.dp))
-            .pointerInput(panZoomMode, scale, pan) {
-                if (panZoomMode) {
-                    detectTransformGestures { _, gesturePan, zoom, _ ->
-                        onScaleChange(scale * zoom)
-                        onPanChange(pan + gesturePan)
-                    }
-                } else {
-                    detectDragGestures(
-                        onDragStart = {
-                            lastCanvasPoint = toCanvasCoords(it)
-                            viewModel.onStrokeStart(lastCanvasPoint)
-                        },
-                        onDragEnd = { viewModel.onStrokeEnd(lastCanvasPoint) },
-                        onDragCancel = { viewModel.onStrokeEnd(lastCanvasPoint) },
-                        onDrag = { change, _ ->
-                            change.consume()
-                            lastCanvasPoint = toCanvasCoords(change.position)
-                            viewModel.onStrokeMove(lastCanvasPoint)
-                        }
-                    )
-                }
-            }
-            .pointerInput(panZoomMode, scale, pan) {
-                if (!panZoomMode) {
-                    detectTapGestures { viewModel.onTap(toCanvasCoords(it)) }
-                }
+            .onSizeChanged { view.onViewportSize(it) }
+            .pointerInput(panZoomMode, view.scale, view.pan) {
+                var lastCanvasPoint = Offset.Zero
+                detectCanvasGestures(
+                    singleFingerPans = panZoomMode,
+                    onTap = { viewModel.onTap(toCanvasCoords(it)) },
+                    onDoubleTap = { view.toggleDoubleTap(it) },
+                    onDrawStart = {
+                        lastCanvasPoint = toCanvasCoords(it)
+                        viewModel.onStrokeStart(lastCanvasPoint)
+                    },
+                    onDrawMove = {
+                        lastCanvasPoint = toCanvasCoords(it)
+                        viewModel.onStrokeMove(lastCanvasPoint)
+                    },
+                    onDrawEnd = { viewModel.onStrokeEnd(lastCanvasPoint) },
+                    onTransform = { view.applyTransform(it) },
+                    onZoomEnd = { view.startInertia(it) }
+                )
             }
     ) {
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer(
-                    scaleX = scale,
-                    scaleY = scale,
-                    translationX = pan.x,
-                    translationY = pan.y,
+                    scaleX = view.scale,
+                    scaleY = view.scale,
+                    translationX = view.pan.x,
+                    translationY = view.pan.y,
                     transformOrigin = TransformOrigin(0f, 0f)
                 )
                 .onSizeChanged { viewModel.ensureCanvas(it.width, it.height) }
@@ -558,6 +532,34 @@ private fun DrawingCanvas(
 
             drawShapePreview(viewModel)
         }
+
+        if (view.isZoomed) {
+            ZoomBadge(
+                percent = view.zoomPercent,
+                onReset = view::reset,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(12.dp)
+            )
+        }
+    }
+}
+
+/** Indicador del zoom actual; al tocarlo vuelve al 100%. */
+@Composable
+private fun ZoomBadge(percent: Int, onReset: () -> Unit, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(NbSurface.copy(alpha = 0.85f))
+            .clickable(onClick = onReset)
+            .padding(horizontal = 10.dp, vertical = 5.dp)
+    ) {
+        Text(
+            text = "$percent%",
+            style = MaterialTheme.typography.labelSmall,
+            color = NbOnSurface
+        )
     }
 }
 

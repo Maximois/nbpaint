@@ -9,6 +9,8 @@ import android.graphics.Canvas
 import android.graphics.Color as AndroidColor
 import android.graphics.Paint
 import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.Typeface
 import android.os.Build
 import android.provider.MediaStore
 import androidx.compose.runtime.getValue
@@ -34,6 +36,7 @@ import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 import kotlin.jvm.JvmName
+import kotlin.math.roundToInt
 import kotlin.random.Random
 
 private const val MAX_HISTORY = 20
@@ -110,6 +113,24 @@ class DrawingViewModel : ViewModel() {
     var shapeCurrent by mutableStateOf<Offset?>(null)
         private set
 
+    /** Qué tan distinta puede ser la región para que la varita mágica la selected. */
+    var smartFillTolerance by mutableFloatStateOf(32f)
+        private set
+
+    var smartFillMode by mutableStateOf(SmartFillMode.COLOR)
+
+    /** Punto donde se.insertará el texto; la UI lo escucha para abrir el diálogo. */
+    var textAnchor by mutableStateOf<Offset?>(null)
+        private set
+
+    fun setSmartFillTolerance(value: Int) {
+        smartFillTolerance = value.coerceIn(0, 128).toFloat()
+    }
+
+    fun dismissTextAnchor() {
+        textAnchor = null
+    }
+
     val layers = mutableStateListOf<PaintLayer>()
 
     var activeLayerIndex by mutableIntStateOf(0)
@@ -136,6 +157,20 @@ class DrawingViewModel : ViewModel() {
         style = Paint.Style.STROKE
         strokeJoin = Paint.Join.ROUND
         strokeCap = Paint.Cap.ROUND
+    }
+
+    /**
+     * El borrador borra de verdad: pone los píxeles en transparente con CLEAR, en vez de
+     * pintar el color de fondo. Así se pueden quitar partes de una imagen importada y queda
+     * al descubierto lo que haya debajo.
+     */
+    private val eraserPaint = Paint().apply {
+        isAntiAlias = true
+        isDither = true
+        style = Paint.Style.STROKE
+        strokeJoin = Paint.Join.ROUND
+        strokeCap = Paint.Cap.ROUND
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
     }
 
     private val shapePaint = Paint().apply {
@@ -415,7 +450,7 @@ class DrawingViewModel : ViewModel() {
                 shapeStart = point
                 shapeCurrent = point
             }
-            PaintTool.BUCKET -> Unit
+            PaintTool.BUCKET, PaintTool.MAGIC_WAND, PaintTool.TEXT -> Unit
         }
     }
 
@@ -424,7 +459,7 @@ class DrawingViewModel : ViewModel() {
         when (currentTool) {
             PaintTool.BRUSH, PaintTool.ERASER -> {
                 val from = lastPoint ?: point
-                canvas.drawLine(from.x, from.y, point.x, point.y, strokePaint)
+                canvas.drawLine(from.x, from.y, point.x, point.y, activeStrokePaint())
                 lastPoint = point
                 compositeBitmap = null
                 revision++
@@ -436,7 +471,7 @@ class DrawingViewModel : ViewModel() {
                 revision++
             }
             PaintTool.LINE, PaintTool.RECTANGLE, PaintTool.CIRCLE -> shapeCurrent = point
-            PaintTool.BUCKET -> Unit
+            PaintTool.BUCKET, PaintTool.MAGIC_WAND, PaintTool.TEXT -> Unit
         }
     }
 
@@ -456,18 +491,62 @@ class DrawingViewModel : ViewModel() {
                 shapeStart = null
                 shapeCurrent = null
             }
-            PaintTool.BUCKET -> Unit
+            PaintTool.BUCKET, PaintTool.MAGIC_WAND, PaintTool.TEXT -> Unit
         }
     }
 
     fun onTap(point: Offset) {
         val layer = activeLayer() ?: return
-        if (currentTool != PaintTool.BUCKET) return
         val x = point.x.toInt()
         val y = point.y.toInt()
-        if (x < 0 || y < 0 || x >= layer.bitmap.width || y >= layer.bitmap.height) return
+
+        when (currentTool) {
+            PaintTool.BUCKET -> {
+                if (x < 0 || y < 0 || x >= layer.bitmap.width || y >= layer.bitmap.height) return
+                pushPixelUndo()
+                floodFill(layer.bitmap, x, y, currentColor)
+            }
+            PaintTool.MAGIC_WAND -> {
+                if (x < 0 || y < 0 || x >= layer.bitmap.width || y >= layer.bitmap.height) return
+                // La copia se toma antes de tocar los píxeles: el historial guarda el
+                // estado previo, así que hace falta guardarlo aunque el relleno no cambie nada.
+                val before = layer.bitmap.copy(Bitmap.Config.ARGB_8888, false)
+                val touched = MagicWand.fill(
+                    bitmap = layer.bitmap,
+                    startX = x,
+                    startY = y,
+                    fillColor = currentColor,
+                    tolerance = smartFillTolerance.toInt(),
+                    mode = smartFillMode
+                )
+                if (touched == 0) return
+                pushHistory(HistoryEntry.PixelEdit(layer.id, before))
+                _messages.tryEmit(
+                    if (smartFillMode == SmartFillMode.COLOR) "Región rellenada"
+                    else "Fondo reconstruido en la región"
+                )
+            }
+            PaintTool.TEXT -> {
+                textAnchor = Offset(x.toFloat(), y.toFloat())
+            }
+            else -> return
+        }
+        compositeBitmap = null
+        revision++
+    }
+
+    /** Inserta el texto confirmado en el diálogo sobre la capa activa. */
+    fun commitText(anchor: Offset, text: String, sizeSp: Float, colorArgb: Int) {
+        val canvas = activeCanvas() ?: return
+        if (text.isBlank()) return
         pushPixelUndo()
-        floodFill(layer.bitmap, x, y, currentColor)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = colorArgb
+            this.textSize = sizeSp
+            this.textAlign = Paint.Align.LEFT
+            typeface = Typeface.create(Typeface.DEFAULT, Typeface.NORMAL)
+        }
+        canvas.drawText(text, anchor.x, anchor.y, paint)
         compositeBitmap = null
         revision++
     }
@@ -493,7 +572,7 @@ class DrawingViewModel : ViewModel() {
     private fun sprayAt(canvas: Canvas, center: Offset) {
         val radius = strokeWidth * 2.2f
         val density = 18
-        val dotPaint = Paint(strokePaint).apply {
+        val dotPaint = Paint(activeStrokePaint()).apply {
             style = Paint.Style.FILL
             strokeWidth = 0f
         }
@@ -506,9 +585,16 @@ class DrawingViewModel : ViewModel() {
         }
     }
 
+    /** Devuelve el paint de trazo configurado según la herramienta activa. */
+    private fun activeStrokePaint(): Paint {
+        val paint = if (currentTool == PaintTool.ERASER) eraserPaint else strokePaint
+        paint.strokeWidth = strokeWidth
+        if (currentTool != PaintTool.ERASER) paint.color = currentColor
+        return paint
+    }
+
     private fun configureStrokePaint() {
-        strokePaint.strokeWidth = strokeWidth
-        strokePaint.color = if (currentTool == PaintTool.ERASER) CANVAS_BACKGROUND else currentColor
+        activeStrokePaint()
     }
 
     private fun configureShapePaint() {
@@ -548,6 +634,95 @@ class DrawingViewModel : ViewModel() {
             }
         }
         return bmp
+    }
+
+    // ---- Filtros e importación de imágenes -------------------------------------
+
+    /** Aplica un filtro a la capa activa. Es una edición de píxeles, así que entra al historial. */
+    fun applyFilter(filter: ImageFilter, amount: Float) {
+        val layer = activeLayer() ?: return
+        pushPixelUndo()
+        ImageFilter.apply(layer.bitmap, filter, amount)
+        compositeBitmap = null
+        revision++
+        _messages.tryEmit("Filtro ${filter.label.lowercase()} aplicado a ${layer.name}")
+    }
+
+    /**
+     * Carga una imagen de la galería como capa nueva, justo encima de la activa para poder
+     * dibujarle encima. Se la ajusta al lienzo conservando la proporción y se centra.
+     */
+    fun importImage(context: Context, uri: android.net.Uri) {
+        if (canvasWidth <= 0 || canvasHeight <= 0) return
+        viewModelScope.launch {
+            val imported = withContext(Dispatchers.IO) {
+                runCatching { decodeFitting(context, uri, canvasWidth, canvasHeight) }.getOrNull()
+            }
+            if (imported == null) {
+                _messages.emit("No se pudo abrir la imagen")
+                return@launch
+            }
+            pushStructuralUndo()
+            layers.add(activeLayerIndex + 1, PaintLayer(nextId(), imported, "Imagen"))
+            activeLayerIndex += 1
+            compositeBitmap = null
+            revision++
+            _messages.emit("Imagen importada: ya podés dibujar encima")
+        }
+    }
+
+    /**
+     * Lee la imagen ya reducida a un tamaño razonable y la escala al lienzo.
+     *
+     * Se calcula primero el `inSampleSize` con `inJustDecodeBounds` para no decodificar de
+     * más: una foto de 12 MP son 48 MB de píxeles y con varias capas el proceso muere.
+     */
+    private fun decodeFitting(
+        context: Context,
+        uri: android.net.Uri,
+        targetWidth: Int,
+        targetHeight: Int
+    ): Bitmap? {
+        val resolver = context.contentResolver
+
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= targetWidth &&
+            bounds.outHeight / (sample * 2) >= targetHeight
+        ) {
+            sample *= 2
+        }
+
+        val decoded = resolver.openInputStream(uri)?.use { stream ->
+            BitmapFactory.decodeStream(
+                stream,
+                null,
+                BitmapFactory.Options().apply {
+                    inSampleSize = sample
+                    inPreferredConfig = Bitmap.Config.ARGB_8888
+                }
+            )
+        } ?: return null
+
+        val scale = minOf(
+            targetWidth.toFloat() / decoded.width,
+            targetHeight.toFloat() / decoded.height
+        )
+        val w = (decoded.width * scale).roundToInt().coerceAtLeast(1)
+        val h = (decoded.height * scale).roundToInt().coerceAtLeast(1)
+
+        val fitted = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
+        Canvas(fitted).apply {
+            drawColor(AndroidColor.TRANSPARENT, PorterDuff.Mode.CLEAR)
+            val left = (targetWidth - w) / 2f
+            val top = (targetHeight - h) / 2f
+            drawBitmap(decoded, null, android.graphics.RectF(left, top, left + w, top + h), null)
+        }
+        decoded.recycle()
+        return fitted
     }
 
     // ---- Exportar / guardar como imagen -------------------------------------

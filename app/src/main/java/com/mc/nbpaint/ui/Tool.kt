@@ -10,7 +10,18 @@ enum class PaintTool(val label: String) {
     RECTANGLE("Rectángulo"),
     CIRCLE("Círculo"),
     SPRAY("Aerógrafo"),
-    BUCKET("Bote de pintura")
+    BUCKET("Bote de pintura"),
+    MAGIC_WAND("Varita mágica"),
+    TEXT("Texto")
+}
+
+/** Cómo se completa una región seleccionada con la varita mágica. */
+enum class SmartFillMode(val label: String) {
+    /** Rellena la región con el color de la herramienta. */
+    COLOR("Con color"),
+
+    /** Rellena la región con el promedio de los píxeles que la rodean: despeja el fondo. */
+    SAMPLE("Con el fondo")
 }
 
 /** Paleta de colores predefinida mostrada en la barra inferior. */

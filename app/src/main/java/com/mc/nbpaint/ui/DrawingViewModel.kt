@@ -25,6 +25,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
@@ -47,6 +48,12 @@ private const val MAX_DOCUMENT_EDGE = 2048
 private const val PROJECT_DIR_NAME = "nbpaint_project"
 private const val PROJECT_MANIFEST = "manifest.txt"
 
+/** Carpeta con las versiones del autoguardado, una subcarpeta numerada por versión. */
+private const val AUTOSAVE_DIR_NAME = "nbpaint_autosaves"
+
+/** Cuántos puntos de autoguardado se conservan. */
+private const val MAX_AUTOSAVES = 5
+
 enum class ExportFormat { PNG, JPEG }
 
 /** Una capa del lienzo: bitmap propio, visibilidad y opacidad. `id` es estable entre operaciones. */
@@ -62,6 +69,14 @@ class PaintLayer(
 }
 
 private data class LayerSnapshot(val bitmap: Bitmap, val name: String, val visible: Boolean, val opacity: Float)
+
+/** Un proyecto completo tal como queda en disco. */
+private data class LayerSet(
+    val width: Int,
+    val height: Int,
+    val activeIndex: Int,
+    val layers: List<LayerSnapshot>
+)
 
 /** Historial unificado: ediciones de píxeles, cambios de estructura de capas y combinar (merge). */
 private sealed interface HistoryEntry {
@@ -214,7 +229,8 @@ class DrawingViewModel : ViewModel() {
                 drawColor(AndroidColor.TRANSPARENT, PorterDuff.Mode.CLEAR)
                 drawBitmap(layer.bitmap, src, dst, null)
             }
-            layer.bitmap.recycle()
+            // El bitmap viejo se suelta pero no se recicla: el historial puede tener una
+            // capa apuntando a él y reciclarlo deja el lienzo con píxeles muertos.
             layer.bitmap = resized
         }
         canvasWidth = width
@@ -282,7 +298,9 @@ class DrawingViewModel : ViewModel() {
 
     private fun pushHistory(entry: HistoryEntry) {
         undoStack.addLast(entry)
-        if (undoStack.size > MAX_HISTORY) undoStack.removeFirst()
+        capUndoHistory()
+        // El redo deja de tener sentido en cuanto se hace algo nuevo.
+        redoStack.forEach { dropEntry(it) }
         redoStack.clear()
         canUndo = true
         canRedo = false
@@ -295,6 +313,28 @@ class DrawingViewModel : ViewModel() {
 
     private fun pushStructuralUndo() {
         pushHistory(HistoryEntry.StructuralEdit(layers.toList(), activeLayerIndex))
+    }
+
+    /**
+     * Descarta una entrada del historial.
+     *
+     * Cada entrada guarda una copia completa de la capa, así que el historial sí acaparaba
+     * memoria. No se recyclean los bitmaps porque una misma copia puede haberse pasado a una
+     * capa con `undo` y quedarse ahí: reciclarla desde el historial deja el lienzo apuntando
+     * a píxeles muertos y la app revienta al toque siguiente. El recolector los libera solo
+     * cuando ya no quedan referencias.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    private fun dropEntry(entry: HistoryEntry) {
+        // Nada que hacer: se deja que el GC recoja la copia cuando quede huérfana.
+    }
+
+    private fun capUndoHistory() {
+        while (undoStack.size > MAX_HISTORY) dropEntry(undoStack.removeFirst())
+    }
+
+    private fun capRedoHistory() {
+        while (redoStack.size > MAX_HISTORY) dropEntry(redoStack.removeFirst())
     }
 
     fun undo() {
@@ -351,15 +391,11 @@ class DrawingViewModel : ViewModel() {
                 undoStack.addLast(entry.copy(forward = false))
             }
         }
-        if (undoStack.size > MAX_HISTORY) undoStack.removeFirst()
+        capUndoHistory()
         canUndo = true
         canRedo = redoStack.isNotEmpty()
         compositeBitmap = null
         revision++
-    }
-
-    private fun capRedoHistory() {
-        if (redoStack.size > MAX_HISTORY) redoStack.removeFirst()
     }
 
     fun clearCanvas() {
@@ -821,53 +857,171 @@ class DrawingViewModel : ViewModel() {
 
     // ---- Guardar / abrir proyecto en progreso (con capas) ---------------------
 
+    /**
+     * Escribe el proyecto en una carpeta propia. Cada autoguardado va a una carpeta
+     * numerada, así se pueden conservar varias versiones en vez de pisar siempre la misma.
+     */
+    private suspend fun writeProjectTo(dir: File, snapshot: List<LayerSnapshot>, width: Int, height: Int, activeIndex: Int): Boolean =
+        runCatching {
+            if (dir.exists()) dir.deleteRecursively()
+            dir.mkdirs()
+            val manifest = StringBuilder()
+            manifest.appendLine("$width,$height,$activeIndex")
+            snapshot.forEachIndexed { index, s ->
+                val fileName = "layer_$index.png"
+                File(dir, fileName).outputStream().use { out -> s.bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
+                manifest.appendLine("$fileName|${s.name}|${s.visible}|${s.opacity}")
+            }
+            File(dir, PROJECT_MANIFEST).writeText(manifest.toString())
+            true
+        }.getOrElse { false }
+
+    private fun currentSnapshot() = layers.map {
+        LayerSnapshot(it.bitmap.copy(Bitmap.Config.ARGB_8888, false), it.name, it.visible, it.opacity)
+    }
+
     fun saveProject(context: Context) {
         if (layers.isEmpty()) return
-        val snapshot = layers.map { LayerSnapshot(it.bitmap.copy(Bitmap.Config.ARGB_8888, false), it.name, it.visible, it.opacity) }
+        val snapshot = currentSnapshot()
         val width = canvasWidth
         val height = canvasHeight
         val activeIndex = activeLayerIndex
         viewModelScope.launch {
             val success = withContext(Dispatchers.IO) {
-                runCatching {
-                    val dir = File(context.filesDir, PROJECT_DIR_NAME)
-                    if (dir.exists()) dir.deleteRecursively()
-                    dir.mkdirs()
-                    val manifest = StringBuilder()
-                    manifest.appendLine("$width,$height,$activeIndex")
-                    snapshot.forEachIndexed { index, s ->
-                        val fileName = "layer_$index.png"
-                        File(dir, fileName).outputStream().use { out -> s.bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) }
-                        manifest.appendLine("$fileName|${s.name}|${s.visible}|${s.opacity}")
-                    }
-                    File(dir, PROJECT_MANIFEST).writeText(manifest.toString())
-                    true
-                }.getOrElse { false }
+                writeProjectTo(File(context.filesDir, PROJECT_DIR_NAME), snapshot, width, height, activeIndex)
             }
             _messages.emit(if (success) "Proyecto guardado" else "No se pudo guardar el proyecto")
         }
     }
 
+    /**
+     * Autoguardado: escribe una copia fechada del estado actual y conserva las últimas
+     * [MAX_AUTOSAVES] para poder volver a cualquiera. Se dispara al dejar de estar en
+     * primer plano, que es cuando el sistema puede matar el proceso.
+     */
+    fun autosave(context: Context) {
+        if (layers.isEmpty()) return
+        if (layers.none { layerHasContent(it) }) return
+        val snapshot = currentSnapshot()
+        val width = canvasWidth
+        val height = canvasHeight
+        val activeIndex = activeLayerIndex
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val root = File(context.filesDir, AUTOSAVE_DIR_NAME)
+                if (!root.exists()) root.mkdirs()
+                // Se numera a partir de las carpetas que ya hay, así el más reciente queda
+                // al final y se puede mostrar como historial.
+                val used = root.listFiles()?.filter { it.isDirectory }?.mapNotNull { it.name.toIntOrNull() }?.toMutableSet() ?: mutableSetOf()
+                var slot = 1
+                while (slot in used) slot++
+                writeProjectTo(File(root, slot.toString()), snapshot, width, height, activeIndex)
+                used.add(slot)
+                // Se descartan las más viejas.
+                used.sorted().take(0.coerceAtLeast(used.size - MAX_AUTOSAVES)).forEach { old ->
+                    File(root, old.toString()).deleteRecursively()
+                    used.remove(old)
+                }
+            }
+        }
+    }
+
+    /** Las versiones guardadas por autoguardado, de la más reciente a la más antigua. */
+    fun autosaveSlots(context: Context): List<Int> {
+        val root = File(context.filesDir, AUTOSAVE_DIR_NAME)
+        if (!root.exists()) return emptyList()
+        return root.listFiles()
+            ?.filter { it.isDirectory && File(it, PROJECT_MANIFEST).exists() }
+            ?.mapNotNull { it.name.toIntOrNull() }
+            ?.sortedDescending()
+            .orEmpty()
+    }
+
+    /**
+     * Carga un punto guardado del historial de autoguardado. Ya no se restaura solo al
+     * abrir: el usuario elige cuál recuperar, así abrir la app nunca pisa lo que está
+     * dibujando en ese momento.
+     */
+    fun restoreAutosave(context: Context, slot: Int) {
+        viewModelScope.launch {
+            val loaded = withContext(Dispatchers.IO) {
+                runCatching { readProjectFrom(File(File(context.filesDir, AUTOSAVE_DIR_NAME), slot.toString())) }.getOrNull()
+            } ?: return@launch
+            val (w, h, active, snapshots) = loaded
+            if (w <= 0 || h <= 0 || snapshots.isEmpty()) return@launch
+            applyLoadedProject(w, h, active, snapshots, "Se recuperó tu trabajo")
+        }
+    }
+
+    private suspend fun applyLoadedProject(
+        w: Int,
+        h: Int,
+        active: Int,
+        snapshots: List<LayerSnapshot>,
+        message: String
+    ) {
+        layers.clear()
+        snapshots.forEach { s -> layers.add(PaintLayer(nextId(), s.bitmap, s.name, s.visible, s.opacity)) }
+        canvasWidth = w
+        canvasHeight = h
+        activeLayerIndex = active.coerceIn(0, layers.lastIndex)
+        undoStack.clear()
+        redoStack.clear()
+        canUndo = false
+        canRedo = false
+        compositeBitmap = null
+        revision++
+        _messages.emit(message)
+    }
+
+    /**
+     * ¿La capa tiene algo dibujado o sigue limpia?
+     *
+     * La primera capa nace con fondo blanco y las de arriba transparentes, así que
+     * "vacía" es cualquier píxel que sea blanco o transparente. Sin esto, la capa en blanco
+     * siempre contaría como contenido y el autoguardado nunca se restauraría.
+     */
+    private fun layerHasContent(layer: PaintLayer): Boolean {
+        if (!layer.visible) return false
+        val bitmap = layer.bitmap
+        val stepX = (bitmap.width / 24).coerceAtLeast(1)
+        val stepY = (bitmap.height / 24).coerceAtLeast(1)
+        for (y in 0 until bitmap.height step stepY) {
+            for (x in 0 until bitmap.width step stepX) {
+                val pixel = bitmap.getPixel(x, y)
+                val isEmpty = (pixel ushr 24) == 0 ||
+                    (pixel and 0x00FFFFFF) == (CANVAS_BACKGROUND and 0x00FFFFFF)
+                if (!isEmpty) return true
+            }
+        }
+        return false
+    }
+
+    /** Lee el proyecto del disco. Devuelve null si no hay nada guardado o está corrupto. */
+    private fun readProject(context: Context): LayerSet? =
+        readProjectFrom(File(context.filesDir, PROJECT_DIR_NAME))
+
+    private fun readProjectFrom(dir: File): LayerSet? {
+        val manifestFile = File(dir, PROJECT_MANIFEST)
+        if (!manifestFile.exists()) return null
+        val lines = manifestFile.readLines()
+        if (lines.isEmpty()) return null
+        val (w, h, active) = lines[0].split(",").map { it.trim().toInt() }
+        val snapshots = mutableListOf<LayerSnapshot>()
+        for (i in 1 until lines.size) {
+            val parts = lines[i].split("|")
+            if (parts.size < 4) continue
+            val (fileName, name, visibleStr, opacityStr) = parts
+            val bmp = BitmapFactory.decodeFile(File(dir, fileName).absolutePath) ?: continue
+            snapshots.add(LayerSnapshot(bmp, name, visibleStr.toBoolean(), opacityStr.toFloatOrNull() ?: 1f))
+        }
+        return if (snapshots.isEmpty()) null else LayerSet(w, h, active, snapshots)
+    }
+
     fun loadProject(context: Context) {
         viewModelScope.launch {
             val result = withContext(Dispatchers.IO) {
-                runCatching {
-                    val dir = File(context.filesDir, PROJECT_DIR_NAME)
-                    val manifestFile = File(dir, PROJECT_MANIFEST)
-                    if (!manifestFile.exists()) return@runCatching null
-                    val lines = manifestFile.readLines()
-                    if (lines.isEmpty()) return@runCatching null
-                    val (w, h, active) = lines[0].split(",").map { it.trim().toInt() }
-                    val loadedLayers = mutableListOf<LayerSnapshot>()
-                    for (i in 1 until lines.size) {
-                        val parts = lines[i].split("|")
-                        if (parts.size < 4) continue
-                        val (fileName, name, visibleStr, opacityStr) = parts
-                        val bmp = BitmapFactory.decodeFile(File(dir, fileName).absolutePath) ?: continue
-                        loadedLayers.add(LayerSnapshot(bmp, name, visibleStr.toBoolean(), opacityStr.toFloatOrNull() ?: 1f))
-                    }
-                    if (loadedLayers.isEmpty()) null else Triple(w, h, active) to loadedLayers
-                }.getOrNull()
+                runCatching { readProject(context) }.getOrNull()
             }
 
             if (result == null) {
@@ -875,20 +1029,8 @@ class DrawingViewModel : ViewModel() {
                 return@launch
             }
 
-            val (dims, loadedSnapshots) = result
-            val (w, h, active) = dims
-            layers.clear()
-            loadedSnapshots.forEach { s -> layers.add(PaintLayer(nextId(), s.bitmap, s.name, s.visible, s.opacity)) }
-            canvasWidth = w
-            canvasHeight = h
-            activeLayerIndex = active.coerceIn(0, layers.lastIndex)
-            undoStack.clear()
-            redoStack.clear()
-            canUndo = false
-            canRedo = false
-            compositeBitmap = null
-            revision++
-            _messages.emit("Proyecto cargado")
+            val (w, h, active, loadedSnapshots) = result
+            applyLoadedProject(w, h, active, loadedSnapshots, "Proyecto cargado")
         }
     }
 

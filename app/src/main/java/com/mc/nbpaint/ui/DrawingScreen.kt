@@ -87,6 +87,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -120,6 +121,8 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mc.nbpaint.ui.theme.NbAccent
 import com.mc.nbpaint.ui.theme.NbAccentLight
@@ -145,6 +148,7 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
     var layersSheetVisible by remember { mutableStateOf(false) }
     var filterSheetVisible by remember { mutableStateOf(false) }
     var paperSheetVisible by remember { mutableStateOf(false) }
+    var autosaveMenuVisible by remember { mutableStateOf(false) }
     var textDialogAnchor by remember { mutableStateOf<Offset?>(null) }
 
     val imagePicker = rememberLauncherForActivityResult(
@@ -160,6 +164,18 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
             textDialogAnchor = anchor
             viewModel.dismissTextAnchor()
         }
+    }
+
+    // Autoguardado: la app puede morir en cualquier momento (el sistema mata procesos en
+    // segundo plano), así que se guarda cada vez que deja de estar en primer plano. No se
+    // restaura solo al abrir: el usuario elige qué versión recuperar del historial.
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) viewModel.autosave(context)
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     var panZoomMode by remember { mutableStateOf(false) }
@@ -245,6 +261,13 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
                             onClick = {
                                 overflowMenuExpanded = false
                                 filterSheetVisible = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Recuperar trabajo guardado") },
+                            onClick = {
+                                overflowMenuExpanded = false
+                                autosaveMenuVisible = true
                             }
                         )
                         DropdownMenuItem(
@@ -339,6 +362,17 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
         FilterSheet(
             viewModel = viewModel,
             onDismiss = { filterSheetVisible = false }
+        )
+    }
+
+    if (autosaveMenuVisible) {
+        AutosaveSheet(
+            slots = viewModel.autosaveSlots(context),
+            onRestore = { slot ->
+                viewModel.restoreAutosave(context, slot)
+                autosaveMenuVisible = false
+            },
+            onDismiss = { autosaveMenuVisible = false }
         )
     }
 
@@ -893,6 +927,84 @@ fun FilterSheet(viewModel: DrawingViewModel, onDismiss: () -> Unit) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text("Aplicar ${selected.label.lowercase()}")
+            }
+        }
+    }
+}
+
+/**
+ * Historial de autoguardados. Cada salida de la app deja un punto guardado, y acá se elige
+ * cuál recuperar. No se carga nada al abrir la app: así nunca se pisa lo que se está
+ * dibujando en ese momento.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun AutosaveSheet(
+    slots: List<Int>,
+    onRestore: (Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = NbSurface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp)
+        ) {
+            Text(
+                text = "Trabajos guardados",
+                style = MaterialTheme.typography.titleMedium,
+                color = NbOnSurface
+            )
+            Text(
+                text = "Se guarda solo cada vez que salís de la app.",
+                style = MaterialTheme.typography.labelMedium,
+                color = NbOnSurfaceMuted
+            )
+            Spacer(Modifier.height(14.dp))
+
+            if (slots.isEmpty()) {
+                Text(
+                    text = "Todavía no hay nada guardado.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = NbOnSurfaceMuted
+                )
+            } else {
+                slots.forEachIndexed { index, slot ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 3.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(NbSurfaceLight)
+                            .clickable { onRestore(slot) }
+                            .padding(horizontal = 14.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                text = if (index == 0) "Más reciente" else "Versión $slot",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = NbOnSurface
+                            )
+                            if (index == 0) {
+                                Text(
+                                    text = "Autoguardado",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = NbOnSurfaceMuted
+                                )
+                            }
+                        }
+                        Text(
+                            text = "Restaurar",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = NbAccent
+                        )
+                    }
+                }
             }
         }
     }

@@ -1,6 +1,11 @@
 package com.mc.nbpaint.ui
 
 import android.graphics.Color as AndroidColor
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -36,10 +41,9 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDownward
 import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.BlurOn
-import androidx.compose.material.icons.filled.Brush
+import androidx.compose.material.icons.filled.Brush as BrushIcon
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.CropSquare
-import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FormatColorFill
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -77,6 +81,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -97,9 +102,12 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mc.nbpaint.ui.theme.NbAccent
+import com.mc.nbpaint.ui.theme.NbAccentLight
 import com.mc.nbpaint.ui.theme.NbBackground
 import com.mc.nbpaint.ui.theme.NbOnSurface
 import com.mc.nbpaint.ui.theme.NbOnSurfaceMuted
@@ -144,7 +152,7 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
-                title = { Text("NB-paint") },
+                title = { AppLogo() },
                 actions = {
                     IconButton(onClick = viewModel::undo, enabled = viewModel.canUndo) {
                         Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Deshacer")
@@ -166,9 +174,6 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
                     }
                     IconButton(onClick = { layersSheetVisible = true }) {
                         Icon(Icons.Filled.Layers, contentDescription = "Capas")
-                    }
-                    IconButton(onClick = viewModel::clearCanvas) {
-                        Icon(Icons.Filled.Delete, contentDescription = "Limpiar capa actual")
                     }
                     Box {
                         IconButton(onClick = { saveMenuExpanded = true }) {
@@ -202,6 +207,13 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
                             expanded = overflowMenuExpanded,
                             onDismissRequest = { overflowMenuExpanded = false }
                         ) {
+                            DropdownMenuItem(
+                                text = { Text("Limpiar capa actual") },
+                                onClick = {
+                                    overflowMenuExpanded = false
+                                    viewModel.clearCanvas()
+                                }
+                            )
                             DropdownMenuItem(
                                 text = { Text("Guardar proyecto") },
                                 onClick = {
@@ -253,9 +265,10 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
                     modifier = Modifier.fillMaxSize()
                 )
             }
-            ColorPaletteRow(viewModel, onOpenCustomColor = { colorPickerVisible = true })
-            StrokeWidthSlider(viewModel)
-            ToolBar(viewModel)
+            BottomDock(
+                viewModel = viewModel,
+                onOpenCustomColor = { colorPickerVisible = true }
+            )
         }
     }
 
@@ -281,6 +294,105 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
     }
 }
 
+/**
+ * Isotipo de la app: "NB" dentro de un cuadro con degradado violeta.
+ * El nombre completo "NB Paint" sigue siendo el nombre de la app (label del launcher).
+ */
+@Composable
+private fun AppLogo(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .size(38.dp)
+            .clip(RoundedCornerShape(11.dp))
+            .background(
+                Brush.linearGradient(
+                    colors = listOf(NbAccentLight, NbAccent)
+                )
+            )
+            .border(
+                width = 1.dp,
+                color = NbAccentLight.copy(alpha = 0.85f),
+                shape = RoundedCornerShape(11.dp)
+            ),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = "NB",
+            color = Color.White,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Black,
+            letterSpacing = 0.5.sp
+        )
+    }
+}
+
+/**
+ * Dock inferior colapsable. Contraído muestra solo el estado actual (color, herramienta,
+ * grosor) en una barra delgada; expandido muestra los paneles de herramientas.
+ *
+ * Para agregar un panel nuevo (capas, plantillas, etc.) basta con insertarlo en el
+ * bloque `content` de [AnimatedVisibility]: el orden y el espacio se ajustan solos.
+ */
+@Composable
+private fun BottomDock(
+    viewModel: DrawingViewModel,
+    onOpenCustomColor: () -> Unit
+) {
+    var expanded by rememberSaveable { mutableStateOf(true) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(NbSurface)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(28.dp)
+                    .clip(CircleShape)
+                    .background(Color(viewModel.currentColor))
+                    .border(2.dp, NbOnSurfaceMuted, CircleShape)
+            )
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = viewModel.currentTool.label,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = NbOnSurface
+                )
+                Text(
+                    text = "${viewModel.strokeWidth.toInt()} px",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NbOnSurfaceMuted
+                )
+            }
+            Icon(
+                imageVector = if (expanded) Icons.Default.KeyboardArrowDown else Icons.Default.KeyboardArrowUp,
+                contentDescription = if (expanded) "Contraer paneles" else "Expandir paneles",
+                tint = NbOnSurfaceMuted
+            )
+        }
+
+        AnimatedVisibility(
+            visible = expanded,
+            enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(),
+            exit = shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut()
+        ) {
+            Column {
+                ColorPaletteRow(viewModel, onOpenCustomColor = onOpenCustomColor)
+                StrokeWidthSlider(viewModel)
+                ToolBar(viewModel)
+            }
+        }
+    }
+}
+
 @Composable
 fun ToolBar(viewModel: DrawingViewModel) {
     val scrollState = rememberScrollState()
@@ -294,7 +406,7 @@ fun ToolBar(viewModel: DrawingViewModel) {
         verticalAlignment = Alignment.CenterVertically
     ) {
         ToolButton(
-            icon = Icons.Default.Brush,
+            icon = Icons.Default.BrushIcon,
             contentDescription = PaintTool.BRUSH.label,
             isSelected = viewModel.currentTool == PaintTool.BRUSH,
             onClick = { viewModel.selectTool(PaintTool.BRUSH) }

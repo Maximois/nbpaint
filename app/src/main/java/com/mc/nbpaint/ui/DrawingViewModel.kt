@@ -41,6 +41,9 @@ import kotlin.random.Random
 
 private const val MAX_HISTORY = 20
 private const val CANVAS_BACKGROUND = AndroidColor.WHITE
+
+/** Tope del lado mayor de la hoja, para que una foto enorme no quede imposible de dibujar. */
+private const val MAX_DOCUMENT_EDGE = 2048
 private const val PROJECT_DIR_NAME = "nbpaint_project"
 private const val PROJECT_MANIFEST = "manifest.txt"
 
@@ -141,8 +144,12 @@ class DrawingViewModel : ViewModel() {
 
     // ---- Motor interno ---------------------------------------------------
 
-    private var canvasWidth = 0
-    private var canvasHeight = 0
+    // Tamaño del documento en píxeles. Es fijo hasta que se elige otro tamaño de hoja:
+    // ver [initDocument] y [resizeDocument].
+    var canvasWidth by mutableIntStateOf(0)
+        private set
+    var canvasHeight by mutableIntStateOf(0)
+        private set
     private var compositeBitmap: Bitmap? = null
 
     private val undoStack = ArrayDeque<HistoryEntry>()
@@ -184,28 +191,57 @@ class DrawingViewModel : ViewModel() {
 
     // ---- Ciclo de vida del lienzo -----------------------------------------
 
-    fun ensureCanvas(width: Int, height: Int) {
+    /**
+     * Cambia el tamaño de la hoja estirando el contenido actual. Se guarda el estado previo
+     * para que sea reversible con deshacer.
+     */
+    fun resizeDocument(width: Int, height: Int) {
         if (width <= 0 || height <= 0) return
-        if (canvasWidth == width && canvasHeight == height && layers.isNotEmpty()) return
-
+        if (width == canvasWidth && height == canvasHeight) return
         if (layers.isEmpty()) {
             canvasWidth = width
             canvasHeight = height
-            val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            Canvas(bmp).drawColor(CANVAS_BACKGROUND)
-            layers.add(PaintLayer(nextId(), bmp, nextLayerName()))
-            activeLayerIndex = 0
-        } else {
-            val src = android.graphics.Rect(0, 0, canvasWidth, canvasHeight)
-            val dst = android.graphics.Rect(0, 0, width, height)
-            layers.forEach { layer ->
-                val resized = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-                Canvas(resized).drawBitmap(layer.bitmap, src, dst, null)
-                layer.bitmap = resized
-            }
-            canvasWidth = width
-            canvasHeight = height
+            initDocument(width, height)
+            return
         }
+
+        pushStructuralUndo()
+        val src = android.graphics.Rect(0, 0, canvasWidth, canvasHeight)
+        val dst = android.graphics.Rect(0, 0, width, height)
+        layers.forEach { layer ->
+            val resized = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+            Canvas(resized).apply {
+                drawColor(AndroidColor.TRANSPARENT, PorterDuff.Mode.CLEAR)
+                drawBitmap(layer.bitmap, src, dst, null)
+            }
+            layer.bitmap.recycle()
+            layer.bitmap = resized
+        }
+        canvasWidth = width
+        canvasHeight = height
+        compositeBitmap = null
+        revision++
+    }
+
+    /**
+     * Crea el documento una sola vez, con el tamaño que tenía el visor en ese momento.
+     *
+     * Importante: el documento **no** se vuelve a redimensionar nunca. Antes sí lo hacía, y
+     * como el dock inferior cambia la altura del visor, cada apertura o cierre estiraba los
+     * píxeles de todas las capas: un cuadrado se volvía rectángulo y el dibujo se deformaba
+     * mientras se movía el panel. Ahora el tamaño del documento es fijo y lo que cambia al
+     * mover los paneles es únicamente el encuadre (zoom y desplazamiento).
+     */
+    fun initDocument(width: Int, height: Int) {
+        if (width <= 0 || height <= 0) return
+        if (layers.isNotEmpty()) return
+
+        canvasWidth = width
+        canvasHeight = height
+        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        Canvas(bmp).drawColor(CANVAS_BACKGROUND)
+        layers.add(PaintLayer(nextId(), bmp, nextLayerName()))
+        activeLayerIndex = 0
         compositeBitmap = null
         revision++
     }
@@ -656,45 +692,43 @@ class DrawingViewModel : ViewModel() {
         if (canvasWidth <= 0 || canvasHeight <= 0) return
         viewModelScope.launch {
             val imported = withContext(Dispatchers.IO) {
-                runCatching { decodeFitting(context, uri, canvasWidth, canvasHeight) }.getOrNull()
+                runCatching { decodeForSheet(context, uri) }.getOrNull()
             }
             if (imported == null) {
                 _messages.emit("No se pudo abrir la imagen")
                 return@launch
             }
+
             pushStructuralUndo()
+            if (imported.width != canvasWidth || imported.height != canvasHeight) {
+                canvasWidth = imported.width
+                canvasHeight = imported.height
+            }
             layers.add(activeLayerIndex + 1, PaintLayer(nextId(), imported, "Imagen"))
             activeLayerIndex += 1
             compositeBitmap = null
             revision++
-            _messages.emit("Imagen importada: ya podés dibujar encima")
+            _messages.emit("Imagen importada: la hoja tomó su tamaño")
         }
     }
 
     /**
-     * Lee la imagen ya reducida a un tamaño razonable y la escala al lienzo.
-     *
-     * Se calcula primero el `inSampleSize` con `inJustDecodeBounds` para no decodificar de
-     * más: una foto de 12 MP son 48 MB de píxeles y con varias capas el proceso muere.
+     * Lee la imagen para que ella misma sea el tamaño de la hoja, sin estirarla ni dejar
+     * bandas. Solo se recorta por [MAX_DOCUMENT_EDGE] para que una foto enorme no vuelva
+     * la hoja imposible de dibujar.
      */
-    private fun decodeFitting(
-        context: Context,
-        uri: android.net.Uri,
-        targetWidth: Int,
-        targetHeight: Int
-    ): Bitmap? {
+    private fun decodeForSheet(context: Context, uri: android.net.Uri): Bitmap? {
         val resolver = context.contentResolver
 
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
 
+        val longestEdge = maxOf(bounds.outWidth, bounds.outHeight)
+        val target = minOf(MAX_DOCUMENT_EDGE, longestEdge)
+
         var sample = 1
-        while (bounds.outWidth / (sample * 2) >= targetWidth &&
-            bounds.outHeight / (sample * 2) >= targetHeight
-        ) {
-            sample *= 2
-        }
+        while (longestEdge / (sample * 2) >= target) sample *= 2
 
         val decoded = resolver.openInputStream(uri)?.use { stream ->
             BitmapFactory.decodeStream(
@@ -708,21 +742,22 @@ class DrawingViewModel : ViewModel() {
         } ?: return null
 
         val scale = minOf(
-            targetWidth.toFloat() / decoded.width,
-            targetHeight.toFloat() / decoded.height
+            1f,
+            MAX_DOCUMENT_EDGE.toFloat() / maxOf(decoded.width, decoded.height)
         )
+        if (scale >= 1f) return decoded
+
         val w = (decoded.width * scale).roundToInt().coerceAtLeast(1)
         val h = (decoded.height * scale).roundToInt().coerceAtLeast(1)
-
-        val fitted = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
-        Canvas(fitted).apply {
-            drawColor(AndroidColor.TRANSPARENT, PorterDuff.Mode.CLEAR)
-            val left = (targetWidth - w) / 2f
-            val top = (targetHeight - h) / 2f
-            drawBitmap(decoded, null, android.graphics.RectF(left, top, left + w, top + h), null)
-        }
+        val scaled = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        Canvas(scaled).drawBitmap(
+            decoded,
+            null,
+            android.graphics.RectF(0f, 0f, w.toFloat(), h.toFloat()),
+            null
+        )
         decoded.recycle()
-        return fitted
+        return scaled
     }
 
     // ---- Exportar / guardar como imagen -------------------------------------

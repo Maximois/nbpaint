@@ -109,6 +109,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -143,6 +144,7 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
     var colorPickerVisible by remember { mutableStateOf(false) }
     var layersSheetVisible by remember { mutableStateOf(false) }
     var filterSheetVisible by remember { mutableStateOf(false) }
+    var paperSheetVisible by remember { mutableStateOf(false) }
     var textDialogAnchor by remember { mutableStateOf<Offset?>(null) }
 
     val imagePicker = rememberLauncherForActivityResult(
@@ -246,6 +248,13 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
                             }
                         )
                         DropdownMenuItem(
+                            text = { Text("Tamaño de la hoja") },
+                            onClick = {
+                                overflowMenuExpanded = false
+                                paperSheetVisible = true
+                            }
+                        )
+                        DropdownMenuItem(
                             text = { Text("Limpiar capa actual") },
                                 onClick = {
                                     overflowMenuExpanded = false
@@ -330,6 +339,18 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
         FilterSheet(
             viewModel = viewModel,
             onDismiss = { filterSheetVisible = false }
+        )
+    }
+
+    if (paperSheetVisible) {
+        PaperSizeSheet(
+            currentWidth = viewModel.canvasWidth,
+            currentHeight = viewModel.canvasHeight,
+            onSelect = { w, h ->
+                viewModel.resizeDocument(w, h)
+                paperSheetVisible = false
+            },
+            onDismiss = { paperSheetVisible = false }
         )
     }
 
@@ -606,12 +627,20 @@ private fun DrawingCanvas(
 ) {
     fun toCanvasCoords(pointer: Offset): Offset = (pointer - view.pan) / view.scale
 
+    val documentWidth = viewModel.canvasWidth
+    val documentHeight = viewModel.canvasHeight
+    val density = LocalDensity.current
+
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
             .background(NbBackground)
             .border(1.dp, NbSurfaceLight, RoundedCornerShape(16.dp))
-            .onSizeChanged { view.onViewportSize(it) }
+            // El visor toma el tamaño que dejan los paneles; el documento no depende de él.
+            .onSizeChanged {
+                view.onViewportSize(it)
+                viewModel.initDocument(it.width, it.height)
+            }
             .pointerInput(panZoomMode, view.scale, view.pan) {
                 var lastCanvasPoint = Offset.Zero
                 detectCanvasGestures(
@@ -632,9 +661,15 @@ private fun DrawingCanvas(
                 )
             }
     ) {
+        // El lienzo se dibuja al tamaño real del documento y es la transformación la que
+        // lo encaja en el visor. Antes ocupaba `fillMaxSize`, con lo cual cambiar el alto del
+        // visor cambiaba el tamaño del dibujo.
         Canvas(
             modifier = Modifier
-                .fillMaxSize()
+                .size(
+                    width = with(density) { documentWidth.toDp() },
+                    height = with(density) { documentHeight.toDp() }
+                )
                 .graphicsLayer(
                     scaleX = view.scale,
                     scaleY = view.scale,
@@ -642,7 +677,7 @@ private fun DrawingCanvas(
                     translationY = view.pan.y,
                     transformOrigin = TransformOrigin(0f, 0f)
                 )
-                .onSizeChanged { viewModel.ensureCanvas(it.width, it.height) }
+                .onSizeChanged { view.onContentSize(it) }
         ) {
             // Se lee `revision` para que el lienzo se repinte en cada cambio del motor.
             @Suppress("UNUSED_EXPRESSION")
@@ -654,7 +689,7 @@ private fun DrawingCanvas(
                     srcOffset = IntOffset.Zero,
                     srcSize = IntSize(image.width, image.height),
                     dstOffset = IntOffset.Zero,
-                    dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt())
+                    dstSize = IntSize(documentWidth, documentHeight)
                 )
             }
 
@@ -857,6 +892,123 @@ fun FilterSheet(viewModel: DrawingViewModel, onDismiss: () -> Unit) {
             ) {
                 Text("Aplicar ${selected.label.lowercase()}")
             }
+        }
+    }
+}
+
+/** Presets de hoja. La proporción se conserva al elegir; el tamaño es en píxeles. */
+private data class PaperSize(val label: String, val width: Int, val height: Int)
+
+private val PaperSizes = listOf(
+    PaperSize("Cuadrado", 2048, 2048),
+    PaperSize("Retrato 3:4", 1536, 2048),
+    PaperSize("Horizontal 4:3", 2048, 1536),
+    PaperSize("Historia 9:16", 1152, 2048),
+    PaperSize("Panorámica 16:9", 2048, 1152),
+    PaperSize("Post 1:1", 1440, 1440)
+)
+
+/**
+ * Selector de tamaño de hoja. Cada opción muestra su proporción con un rectángulo de
+ * verdad para que se vea la forma sin tener que leer el nombre.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun PaperSizeSheet(
+    currentWidth: Int,
+    currentHeight: Int,
+    onSelect: (Int, Int) -> Unit,
+    onDismiss: () -> Unit
+) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = NbSurface
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp)
+        ) {
+            Text(
+                text = "Tamaño de la hoja",
+                style = MaterialTheme.typography.titleMedium,
+                color = NbOnSurface
+            )
+            Text(
+                text = "Ahora: $currentWidth x $currentHeight px",
+                style = MaterialTheme.typography.labelMedium,
+                color = NbOnSurfaceMuted
+            )
+            Spacer(Modifier.height(16.dp))
+
+            PaperSizes.chunked(3).forEach { row ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    row.forEach { size ->
+                        val isCurrent = size.width == currentWidth && size.height == currentHeight
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(if (isCurrent) NbAccent.copy(alpha = 0.18f) else NbSurfaceLight)
+                                .clickable { onSelect(size.width, size.height) }
+                                .padding(vertical = 12.dp, horizontal = 6.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            PaperOutline(size.width, size.height)
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                text = size.label,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (isCurrent) NbOnSurface else NbOnSurfaceMuted
+                            )
+                        }
+                    }
+                    repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = "Al cambiar la tamaño, el dibujo se estira. Podés deshacerlo.",
+                style = MaterialTheme.typography.bodySmall,
+                color = NbOnSurfaceMuted
+            )
+        }
+    }
+}
+
+/** Dibuja la proporción real de la hoja, contenida en un cuadro de 44x44 dp. */
+@Composable
+private fun PaperOutline(width: Int, height: Int, box: Dp = 44.dp) {
+    val ratio = width.toFloat() / height.toFloat()
+    Box(
+        modifier = Modifier.size(box),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w: Float
+            val h: Float
+            if (ratio >= 1f) {
+                w = size.width
+                h = size.width / ratio
+            } else {
+                h = size.height
+                w = size.height * ratio
+            }
+            val left = (size.width - w) / 2f
+            val top = (size.height - h) / 2f
+            drawRect(
+                color = NbAccent,
+                topLeft = Offset(left, top),
+                size = androidx.compose.ui.geometry.Size(w, h),
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 2.dp.toPx())
+            )
         }
     }
 }

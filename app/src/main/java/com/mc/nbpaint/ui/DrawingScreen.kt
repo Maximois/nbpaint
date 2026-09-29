@@ -1,5 +1,6 @@
 package com.mc.nbpaint.ui
 
+import android.graphics.Color as AndroidColor
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -8,15 +9,16 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,30 +29,31 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Backspace
+import androidx.compose.material.icons.automirrored.filled.Redo
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Backspace
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.BlurOn
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Circle
 import androidx.compose.material.icons.filled.CropSquare
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.FormatPaint
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.FormatColorFill
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Layers
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.OpenWith
-import androidx.compose.material.icons.filled.Redo
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Timeline
-import androidx.compose.material.icons.filled.Undo
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.ZoomOutMap
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -60,6 +63,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -73,38 +77,46 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Fill
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.graphics.drawscope.DrawScope
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.mc.nbpaint.ui.theme.NbAccent
+import com.mc.nbpaint.ui.theme.NbBackground
+import com.mc.nbpaint.ui.theme.NbOnSurface
 import com.mc.nbpaint.ui.theme.NbOnSurfaceMuted
 import com.mc.nbpaint.ui.theme.NbSurface
 import com.mc.nbpaint.ui.theme.NbSurfaceLight
 import kotlinx.coroutines.launch
 import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.roundToInt
+
+private const val MIN_SCALE = 1f
+private const val MAX_SCALE = 6f
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
 
     var saveMenuExpanded by remember { mutableStateOf(false) }
@@ -113,16 +125,18 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
     var layersSheetVisible by remember { mutableStateOf(false) }
 
     var panZoomMode by remember { mutableStateOf(false) }
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
+    val scale = remember { mutableFloatStateOf(1f) }
+    val pan = remember { mutableStateOf(Offset.Zero) }
 
-    val scaleState = remember { mutableFloatStateOf(1f) }
-    val offsetState = remember { mutableStateOf(Offset.Zero) }
+    fun resetZoom() {
+        scale.floatValue = 1f
+        pan.value = Offset.Zero
+    }
+
+    val isZoomed = scale.floatValue != 1f || pan.value != Offset.Zero
 
     LaunchedEffect(viewModel.messages) {
-        viewModel.messages.collect { msg ->
-            scope.launch { snackbarHostState.showSnackbar(msg) }
-        }
+        viewModel.messages.collect { snackbarHostState.showSnackbar(it) }
     }
 
     Scaffold(
@@ -132,11 +146,11 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
             TopAppBar(
                 title = { Text("NB-paint") },
                 actions = {
-                    IconButton(onClick = { viewModel.undo() }, enabled = viewModel.canUndo) {
-                        Icon(Icons.Filled.Undo, contentDescription = "Deshacer")
+                    IconButton(onClick = viewModel::undo, enabled = viewModel.canUndo) {
+                        Icon(Icons.AutoMirrored.Filled.Undo, contentDescription = "Deshacer")
                     }
-                    IconButton(onClick = { viewModel.redo() }, enabled = viewModel.canRedo) {
-                        Icon(Icons.Filled.Redo, contentDescription = "Rehacer")
+                    IconButton(onClick = viewModel::redo, enabled = viewModel.canRedo) {
+                        Icon(Icons.AutoMirrored.Filled.Redo, contentDescription = "Rehacer")
                     }
                     IconButton(onClick = { panZoomMode = !panZoomMode }) {
                         Icon(
@@ -145,29 +159,38 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
                             tint = if (panZoomMode) NbAccent else MaterialTheme.colorScheme.onSurface
                         )
                     }
-                    if (scale != 1f || offset != Offset.Zero) {
-                        IconButton(onClick = { scale = 1f; offset = Offset.Zero }) {
+                    if (isZoomed) {
+                        IconButton(onClick = ::resetZoom) {
                             Icon(Icons.Filled.ZoomOutMap, contentDescription = "Restablecer zoom")
                         }
                     }
                     IconButton(onClick = { layersSheetVisible = true }) {
                         Icon(Icons.Filled.Layers, contentDescription = "Capas")
                     }
-                    IconButton(onClick = { viewModel.clearCanvas() }) {
+                    IconButton(onClick = viewModel::clearCanvas) {
                         Icon(Icons.Filled.Delete, contentDescription = "Limpiar capa actual")
                     }
                     Box {
                         IconButton(onClick = { saveMenuExpanded = true }) {
                             Icon(Icons.Filled.Save, contentDescription = "Guardar imagen")
                         }
-                        DropdownMenu(expanded = saveMenuExpanded, onDismissRequest = { saveMenuExpanded = false }) {
+                        DropdownMenu(
+                            expanded = saveMenuExpanded,
+                            onDismissRequest = { saveMenuExpanded = false }
+                        ) {
                             DropdownMenuItem(
                                 text = { Text("Guardar como PNG") },
-                                onClick = { saveMenuExpanded = false; viewModel.saveToGallery(context, ExportFormat.PNG) }
+                                onClick = {
+                                    saveMenuExpanded = false
+                                    viewModel.saveToGallery(context, ExportFormat.PNG)
+                                }
                             )
                             DropdownMenuItem(
                                 text = { Text("Guardar como JPEG") },
-                                onClick = { saveMenuExpanded = false; viewModel.saveToGallery(context, ExportFormat.JPEG) }
+                                onClick = {
+                                    saveMenuExpanded = false
+                                    viewModel.saveToGallery(context, ExportFormat.JPEG)
+                                }
                             )
                         }
                     }
@@ -175,18 +198,30 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
                         IconButton(onClick = { overflowMenuExpanded = true }) {
                             Icon(Icons.Filled.MoreVert, contentDescription = "Más opciones")
                         }
-                        DropdownMenu(expanded = overflowMenuExpanded, onDismissRequest = { overflowMenuExpanded = false }) {
+                        DropdownMenu(
+                            expanded = overflowMenuExpanded,
+                            onDismissRequest = { overflowMenuExpanded = false }
+                        ) {
                             DropdownMenuItem(
                                 text = { Text("Guardar proyecto") },
-                                onClick = { overflowMenuExpanded = false; viewModel.saveProject(context) }
+                                onClick = {
+                                    overflowMenuExpanded = false
+                                    viewModel.saveProject(context)
+                                }
                             )
                             DropdownMenuItem(
                                 text = { Text("Abrir proyecto") },
-                                onClick = { overflowMenuExpanded = false; viewModel.loadProject(context) }
+                                onClick = {
+                                    overflowMenuExpanded = false
+                                    viewModel.loadProject(context)
+                                }
                             )
                             DropdownMenuItem(
                                 text = { Text("Compartir proyecto (.nbpaint)") },
-                                onClick = { overflowMenuExpanded = false; viewModel.shareProject(context) }
+                                onClick = {
+                                    overflowMenuExpanded = false
+                                    viewModel.shareProject(context)
+                                }
                             )
                         }
                     }
@@ -195,14 +230,29 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
             )
         }
     ) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            DrawingCanvas(
-                viewModel = viewModel,
-                panZoomMode = panZoomMode,
-                scaleState = scaleState,
-                offsetState = offsetState,
-                modifier = Modifier.fillMaxWidth().weight(1f).padding(12.dp)
-            )
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .padding(12.dp)
+            ) {
+                DrawingCanvas(
+                    viewModel = viewModel,
+                    panZoomMode = panZoomMode,
+                    scale = scale.floatValue,
+                    pan = pan.value,
+                    onScaleChange = { newScale ->
+                        scale.floatValue = newScale.coerceIn(MIN_SCALE, MAX_SCALE)
+                    },
+                    onPanChange = { newPan -> pan.value = newPan },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
             ColorPaletteRow(viewModel, onOpenCustomColor = { colorPickerVisible = true })
             StrokeWidthSlider(viewModel)
             ToolBar(viewModel)
@@ -212,9 +262,9 @@ fun DrawingScreen(viewModel: DrawingViewModel = viewModel()) {
     if (colorPickerVisible) {
         ColorPickerDialog(
             onDismiss = { colorPickerVisible = false },
-            initialColor = viewModel.brushColor,
+            initialColor = Color(viewModel.currentColor),
             onColorSelected = { color ->
-                viewModel.updateBrushColor(color)
+                viewModel.selectColor(color.toArgb())
                 colorPickerVisible = false
             }
         )
@@ -239,126 +289,132 @@ fun ToolBar(viewModel: DrawingViewModel) {
             .fillMaxWidth()
             .background(NbSurface)
             .horizontalScroll(scrollState)
-            .padding(8.dp),
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         ToolButton(
             icon = Icons.Default.Brush,
-            contentDescription = "Pincel",
-            isSelected = viewModel.currentTool == Tool.Brush,
-            onClick = { viewModel.updateTool(Tool.Brush) }
+            contentDescription = PaintTool.BRUSH.label,
+            isSelected = viewModel.currentTool == PaintTool.BRUSH,
+            onClick = { viewModel.selectTool(PaintTool.BRUSH) }
         )
         ToolButton(
-            icon = Icons.Default.FormatPaint,
-            contentDescription = "Pincel Alisado",
-            isSelected = viewModel.currentTool == Tool.SmoothBrush,
-            onClick = { viewModel.updateTool(Tool.SmoothBrush) }
-        )
-        ToolButton(
-            icon = Icons.Default.FormatColorFill,
-            contentDescription = "Relleno",
-            isSelected = viewModel.currentTool == Tool.Bucket,
-            onClick = { viewModel.updateTool(Tool.Bucket) }
-        )
-        ToolButton(
-            icon = Icons.Default.Backspace,
-            contentDescription = "Borrador",
-            isSelected = viewModel.currentTool == Tool.Eraser,
-            onClick = { viewModel.updateTool(Tool.Eraser) }
-        )
-        ToolButton(
-            icon = Icons.Default.Timeline,
-            contentDescription = "Línea",
-            isSelected = viewModel.currentTool == Tool.Line,
-            onClick = { viewModel.updateTool(Tool.Line) }
-        )
-        ToolButton(
-            icon = Icons.Default.CropSquare,
-            contentDescription = "Rectángulo",
-            isSelected = viewModel.currentTool == Tool.Rectangle,
-            onClick = { viewModel.updateTool(Tool.Rectangle) }
-        )
-        ToolButton(
-            icon = Icons.Default.Circle,
-            contentDescription = "Círculo",
-            isSelected = viewModel.currentTool == Tool.Circle,
-            onClick = { viewModel.updateTool(Tool.Circle) }
+            icon = Icons.AutoMirrored.Filled.Backspace,
+            contentDescription = PaintTool.ERASER.label,
+            isSelected = viewModel.currentTool == PaintTool.ERASER,
+            onClick = { viewModel.selectTool(PaintTool.ERASER) }
         )
         ToolButton(
             icon = Icons.Default.BlurOn,
-            contentDescription = "Difuminar",
-            isSelected = viewModel.currentTool == Tool.Blur,
-            onClick = { viewModel.updateTool(Tool.Blur) }
+            contentDescription = PaintTool.SPRAY.label,
+            isSelected = viewModel.currentTool == PaintTool.SPRAY,
+            onClick = { viewModel.selectTool(PaintTool.SPRAY) }
         )
+        ToolButton(
+            icon = Icons.Default.FormatColorFill,
+            contentDescription = PaintTool.BUCKET.label,
+            isSelected = viewModel.currentTool == PaintTool.BUCKET,
+            onClick = { viewModel.selectTool(PaintTool.BUCKET) }
+        )
+        ToolButton(
+            icon = Icons.Default.Timeline,
+            contentDescription = PaintTool.LINE.label,
+            isSelected = viewModel.currentTool == PaintTool.LINE,
+            onClick = { viewModel.selectTool(PaintTool.LINE) }
+        )
+        ToolButton(
+            icon = Icons.Default.CropSquare,
+            contentDescription = PaintTool.RECTANGLE.label,
+            isSelected = viewModel.currentTool == PaintTool.RECTANGLE,
+            onClick = { viewModel.selectTool(PaintTool.RECTANGLE) }
+        )
+        ToolButton(
+            icon = Icons.Default.Circle,
+            contentDescription = PaintTool.CIRCLE.label,
+            isSelected = viewModel.currentTool == PaintTool.CIRCLE,
+            onClick = { viewModel.selectTool(PaintTool.CIRCLE) }
+        )
+
+        if (viewModel.currentTool == PaintTool.RECTANGLE || viewModel.currentTool == PaintTool.CIRCLE) {
+            ToolButton(
+                icon = Icons.Default.Edit,
+                contentDescription = "Rellenar figura",
+                isSelected = viewModel.shapeFilled,
+                onClick = viewModel::toggleShapeFilled
+            )
+        }
     }
 }
 
 @Composable
-fun ToolButton(
+private fun ToolButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     contentDescription: String,
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
-    IconButton(
-        onClick = onClick,
+    Box(
         modifier = Modifier
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (isSelected) NbAccent.copy(alpha = 0.2f) else Color.Transparent)
-            .border(
-                width = 1.dp,
-                color = if (isSelected) NbAccent else Color.Transparent,
-                shape = RoundedCornerShape(8.dp)
-            )
+            .size(48.dp)
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (isSelected) NbAccent else NbSurfaceLight)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
     ) {
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = if (isSelected) NbAccent else MaterialTheme.colorScheme.onSurface
+            tint = if (isSelected) NbOnSurface else NbOnSurfaceMuted,
+            modifier = Modifier.size(22.dp)
         )
     }
 }
 
 @Composable
-fun DrawingCanvas(
+private fun DrawingCanvas(
     viewModel: DrawingViewModel,
     panZoomMode: Boolean,
-    scaleState: androidx.compose.runtime.MutableFloatState,
-    offsetState: androidx.compose.runtime.MutableState<Offset>,
+    scale: Float,
+    pan: Offset,
+    onScaleChange: (Float) -> Unit,
+    onPanChange: (Offset) -> Unit,
     modifier: Modifier = Modifier
 ) {
+    fun toCanvasCoords(pointer: Offset): Offset = (pointer - pan) / scale
+
+    var lastCanvasPoint by remember { mutableStateOf(Offset.Zero) }
+
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
-            .background(Color.White)
+            .background(NbBackground)
             .border(1.dp, NbSurfaceLight, RoundedCornerShape(16.dp))
-            .pointerInput(panZoomMode) {
+            .pointerInput(panZoomMode, scale, pan) {
                 if (panZoomMode) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        scaleState.floatValue *= zoom
-                        offsetState.value += pan
+                    detectTransformGestures { _, gesturePan, zoom, _ ->
+                        onScaleChange(scale * zoom)
+                        onPanChange(pan + gesturePan)
                     }
                 } else {
                     detectDragGestures(
-                        onDragStart = { offset ->
-                            val adjustedOffset = (offset - offsetState.value) / scaleState.floatValue
-                            viewModel.startDrawing(adjustedOffset)
+                        onDragStart = {
+                            lastCanvasPoint = toCanvasCoords(it)
+                            viewModel.onStrokeStart(lastCanvasPoint)
                         },
+                        onDragEnd = { viewModel.onStrokeEnd(lastCanvasPoint) },
+                        onDragCancel = { viewModel.onStrokeEnd(lastCanvasPoint) },
                         onDrag = { change, _ ->
-                            val adjustedOffset = (change.position - offsetState.value) / scaleState.floatValue
-                            viewModel.draw(adjustedOffset)
-                        },
-                        onDragEnd = { viewModel.endDrawing() }
+                            change.consume()
+                            lastCanvasPoint = toCanvasCoords(change.position)
+                            viewModel.onStrokeMove(lastCanvasPoint)
+                        }
                     )
                 }
             }
-            .pointerInput(panZoomMode) {
+            .pointerInput(panZoomMode, scale, pan) {
                 if (!panZoomMode) {
-                    detectTapGestures { offset ->
-                        val adjustedOffset = (offset - offsetState.value) / scaleState.floatValue
-                        viewModel.handleTap(adjustedOffset)
-                    }
+                    detectTapGestures { viewModel.onTap(toCanvasCoords(it)) }
                 }
             }
     ) {
@@ -366,79 +422,96 @@ fun DrawingCanvas(
             modifier = Modifier
                 .fillMaxSize()
                 .graphicsLayer(
-                    scaleX = scaleState.floatValue,
-                    scaleY = scaleState.floatValue,
-                    translationX = offsetState.value.x,
-                    translationY = offsetState.value.y,
+                    scaleX = scale,
+                    scaleY = scale,
+                    translationX = pan.x,
+                    translationY = pan.y,
                     transformOrigin = TransformOrigin(0f, 0f)
                 )
+                .onSizeChanged { viewModel.ensureCanvas(it.width, it.height) }
         ) {
-            viewModel.layers.forEach { layer ->
-                if (layer.isVisible) {
-                    layer.paths.forEach { pathData ->
-                        drawPathData(pathData)
-                    }
-                }
+            // Se lee `revision` para que el lienzo se repinte en cada cambio del motor.
+            @Suppress("UNUSED_EXPRESSION")
+            viewModel.revision
+
+            viewModel.currentImageBitmap()?.let { image ->
+                drawImage(
+                    image = image,
+                    srcOffset = IntOffset.Zero,
+                    srcSize = IntSize(image.width, image.height),
+                    dstOffset = IntOffset.Zero,
+                    dstSize = IntSize(size.width.roundToInt(), size.height.roundToInt())
+                )
             }
-            // Vista previa del trazo actual
-            viewModel.currentPathData?.let { drawPathData(it) }
+
+            drawShapePreview(viewModel)
         }
     }
 }
 
-private fun DrawScope.drawPathData(pathData: PathData) {
-    val style = if (pathData.isFilled) Fill else Stroke(
-        width = pathData.strokeWidth,
-        cap = StrokeCap.Round,
-        pathEffect = if (pathData.tool == Tool.Blur) PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f) else null
-    )
-    
-    when (pathData.tool) {
-        Tool.Rectangle -> {
-            val size = Size(
-                abs(pathData.endPoint.x - pathData.startPoint.x),
-                abs(pathData.endPoint.y - pathData.startPoint.y)
+/** Vista previa punteada de la figura que se está arrastrando. */
+private fun DrawScope.drawShapePreview(viewModel: DrawingViewModel) {
+    val start = viewModel.shapeStart ?: return
+    val end = viewModel.shapeCurrent ?: return
+    val filled = viewModel.shapeFilled
+
+    val style = if (filled) {
+        Fill
+    } else {
+        Stroke(
+            width = viewModel.strokeWidth,
+            cap = StrokeCap.Round,
+            pathEffect = androidx.compose.ui.graphics.PathEffect.dashPathEffect(
+                floatArrayOf(10f, 8f), 0f
             )
-            val topLeft = Offset(
-                minOf(pathData.startPoint.x, pathData.endPoint.x),
-                minOf(pathData.startPoint.y, pathData.endPoint.y)
-            )
-            drawRect(color = pathData.color, topLeft = topLeft, size = size, style = style)
+        )
+    }
+    val color = Color(viewModel.currentColor)
+
+    when (viewModel.currentTool) {
+        PaintTool.LINE -> drawLine(
+            color = color,
+            start = start,
+            end = end,
+            cap = StrokeCap.Round,
+            strokeWidth = viewModel.strokeWidth
+        )
+        PaintTool.RECTANGLE -> {
+            val topLeft = Offset(minOf(start.x, end.x), minOf(start.y, end.y))
+            val rectSize = Size(abs(start.x - end.x), abs(start.y - end.y))
+            drawRect(color = color, topLeft = topLeft, size = rectSize, style = style)
         }
-        Tool.Circle -> {
-            val radius = (pathData.endPoint - pathData.startPoint).getDistance()
-            drawCircle(color = pathData.color, radius = radius, center = pathData.startPoint, style = style)
+        PaintTool.CIRCLE -> {
+            val center = Offset((start.x + end.x) / 2f, (start.y + end.y) / 2f)
+            val radius = hypot((end.x - start.x).toDouble(), (end.y - start.y).toDouble()).toFloat() / 2f
+            drawCircle(color = color, radius = radius, center = center, style = style)
         }
-        else -> {
-            drawPath(path = pathData.path, color = pathData.color, style = style)
-        }
+        else -> Unit
     }
 }
 
 @Composable
 fun ColorPaletteRow(viewModel: DrawingViewModel, onOpenCustomColor: () -> Unit) {
-    val colors = listOf(
-        Color.Black, Color.DarkGray, Color.Gray, Color.LightGray, Color.White,
-        Color.Red, Color(0xFFE91E63), Color(0xFF9C27B0), Color(0xFF673AB7),
-        Color.Blue, Color(0xFF03A9F4), Color(0xFF00BCD4), Color(0xFF009688),
-        Color.Green, Color(0xFF8BC34A), Color(0xFFCDDC39), Color.Yellow,
-        Color(0xFFFFC107), Color(0xFFFF9800), Color(0xFFFF5722), Color(0xFF795548)
-    )
-
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+            .background(NbSurface)
+            .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         IconButton(onClick = onOpenCustomColor) {
-            Icon(Icons.Default.Add, contentDescription = "Color personalizado", tint = NbAccent)
+            Icon(
+                imageVector = Icons.Default.Add,
+                contentDescription = "Color personalizado",
+                tint = NbAccent
+            )
         }
         LazyRow(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(end = 16.dp)
+            contentPadding = PaddingValues(end = 12.dp)
         ) {
-            items(colors) { color ->
+            items(PresetPalette) { argb ->
+                val color = Color(argb.toInt())
                 Box(
                     modifier = Modifier
                         .size(36.dp)
@@ -446,10 +519,10 @@ fun ColorPaletteRow(viewModel: DrawingViewModel, onOpenCustomColor: () -> Unit) 
                         .background(color)
                         .border(
                             width = 2.dp,
-                            color = if (viewModel.brushColor == color) NbAccent else Color.Transparent,
+                            color = if (viewModel.currentColor == argb.toInt()) NbAccent else Color.Transparent,
                             shape = CircleShape
                         )
-                        .clickable { viewModel.updateBrushColor(color) }
+                        .clickable { viewModel.selectColor(argb.toInt()) }
                 )
             }
         }
@@ -461,21 +534,30 @@ fun StrokeWidthSlider(viewModel: DrawingViewModel) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 24.dp, vertical = 8.dp)
+            .background(NbSurface)
+            .padding(horizontal = 24.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Tamaño del pincel", style = MaterialTheme.typography.labelMedium, color = NbOnSurfaceMuted)
-            Text("${viewModel.strokeWidth.toInt()} px", style = MaterialTheme.typography.labelLarge, color = NbAccent)
+            Text(
+                text = "Tamaño del pincel",
+                style = MaterialTheme.typography.labelMedium,
+                color = NbOnSurfaceMuted
+            )
+            Text(
+                text = "${viewModel.strokeWidth.toInt()} px",
+                style = MaterialTheme.typography.labelLarge,
+                color = NbAccent
+            )
         }
         Slider(
             value = viewModel.strokeWidth,
-            onValueChange = { viewModel.updateStrokeWidth(it) },
-            valueRange = 1f..100f,
-            colors = androidx.compose.material3.SliderDefaults.colors(
+            onValueChange = viewModel::setStrokeWidth,
+            valueRange = 2f..60f,
+            colors = SliderDefaults.colors(
                 thumbColor = NbAccent,
                 activeTrackColor = NbAccent,
                 inactiveTrackColor = NbSurfaceLight
@@ -489,91 +571,189 @@ fun LayersSheet(viewModel: DrawingViewModel) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(16.dp)
+            .padding(horizontal = 16.dp)
+            .padding(bottom = 24.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Capas", style = MaterialTheme.typography.titleLarge)
-            TextButton(onClick = { viewModel.addLayer() }) {
+            Text("Capas", style = MaterialTheme.typography.titleLarge, color = NbOnSurface)
+            TextButton(onClick = viewModel::addLayer) {
                 Icon(Icons.Default.Add, contentDescription = null)
                 Spacer(Modifier.width(4.dp))
-                Text("Nueva Capa")
+                Text("Nueva capa")
             }
         }
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(8.dp))
+
+        // La capa superior se muestra primero, como en los editores de imagen.
+        val ordered = viewModel.layers.indices.reversed()
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.height(300.dp)
+            modifier = Modifier.height(320.dp)
         ) {
-            items(viewModel.layers.reversed()) { layer ->
+            items(ordered.toList(), key = { viewModel.layers[it].id }) { index ->
                 LayerItem(
-                    layer = layer,
-                    isSelected = viewModel.activeLayerId == layer.id,
-                    onSelect = { viewModel.selectLayer(layer.id) },
-                    onToggleVisibility = { viewModel.toggleLayerVisibility(layer.id) },
-                    onDelete = { viewModel.deleteLayer(layer.id) },
-                    onMoveUp = { viewModel.moveLayerUp(layer.id) },
-                    onMoveDown = { viewModel.moveLayerDown(layer.id) }
+                    viewModel = viewModel,
+                    index = index,
+                    isSelected = viewModel.activeLayerIndex == index,
+                    onSelect = { viewModel.selectLayer(index) }
                 )
             }
         }
-        Spacer(Modifier.height(16.dp))
     }
 }
 
 @Composable
-fun LayerItem(
-    layer: Layer,
+private fun LayerItem(
+    viewModel: DrawingViewModel,
+    index: Int,
     isSelected: Boolean,
-    onSelect: () -> Unit,
-    onToggleVisibility: () -> Unit,
-    onDelete: () -> Unit,
-    onMoveUp: () -> Unit,
-    onMoveDown: () -> Unit
+    onSelect: () -> Unit
 ) {
-    Row(
+    val layer = viewModel.layers[index]
+    var renaming by remember { mutableStateOf(false) }
+
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(if (isSelected) NbAccent.copy(alpha = 0.1f) else NbSurfaceLight)
+            .background(if (isSelected) NbAccent.copy(alpha = 0.12f) else NbSurfaceLight)
             .border(
                 width = 1.dp,
                 color = if (isSelected) NbAccent else Color.Transparent,
                 shape = RoundedCornerShape(12.dp)
             )
-            .clickable { onSelect() }
-            .padding(8.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .clickable(onClick = onSelect)
+            .padding(horizontal = 8.dp, vertical = 6.dp)
     ) {
-        IconButton(onClick = onToggleVisibility) {
-            Icon(
-                if (layer.isVisible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
-                contentDescription = "Visibilidad",
-                tint = if (layer.isVisible) NbAccent else NbOnSurfaceMuted
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = { viewModel.toggleLayerVisibility(index) }) {
+                Icon(
+                    imageVector = if (layer.visible) Icons.Default.Visibility else Icons.Default.VisibilityOff,
+                    contentDescription = "Visibilidad",
+                    tint = if (layer.visible) NbAccent else NbOnSurfaceMuted,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+
+            if (renaming) {
+                RenameLayerDialog(
+                    initialName = layer.name,
+                    onDismiss = { renaming = false },
+                    onConfirm = { newName ->
+                        viewModel.renameLayer(index, newName)
+                        renaming = false
+                    }
+                )
+            } else {
+                Text(
+                    text = layer.name,
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable { renaming = true },
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (isSelected) NbAccent else MaterialTheme.colorScheme.onSurface
+                )
+            }
+
+            IconButton(onClick = { viewModel.moveLayerUp(index) }, enabled = index < viewModel.layers.lastIndex) {
+                Icon(
+                    Icons.Default.KeyboardArrowUp,
+                    contentDescription = "Subir capa",
+                    tint = if (index < viewModel.layers.lastIndex) NbOnSurfaceMuted else NbSurfaceLight,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            IconButton(onClick = { viewModel.moveLayerDown(index) }, enabled = index > 0) {
+                Icon(
+                    Icons.Default.KeyboardArrowDown,
+                    contentDescription = "Bajar capa",
+                    tint = if (index > 0) NbOnSurfaceMuted else NbSurfaceLight,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            IconButton(
+                onClick = { viewModel.mergeDown(index) },
+                enabled = index > 0
+            ) {
+                Icon(
+                    Icons.Default.ArrowDownward,
+                    contentDescription = "Combinar con la de abajo",
+                    tint = if (index > 0) NbAccent else NbSurfaceLight,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+            IconButton(
+                onClick = { viewModel.removeLayer(index) },
+                enabled = viewModel.layers.size > 1
+            ) {
+                Icon(
+                    Icons.Default.Remove,
+                    contentDescription = "Eliminar capa",
+                    tint = if (viewModel.layers.size > 1) Color.Red.copy(alpha = 0.7f) else NbSurfaceLight,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            Text(
+                text = "Opacidad",
+                style = MaterialTheme.typography.labelSmall,
+                color = NbOnSurfaceMuted
             )
-        }
-        Text(
-            text = layer.name,
-            modifier = Modifier.weight(1f),
-            style = MaterialTheme.typography.bodyLarge,
-            color = if (isSelected) NbAccent else MaterialTheme.colorScheme.onSurface
-        )
-        IconButton(onClick = onMoveUp) {
-            Icon(Icons.Default.KeyboardArrowUp, contentDescription = "Subir", size(20.dp))
-        }
-        IconButton(onClick = onMoveDown) {
-            Icon(Icons.Default.KeyboardArrowDown, contentDescription = "Bajar", size(20.dp))
-        }
-        IconButton(onClick = onDelete, enabled = !layer.isLocked) {
-            Icon(Icons.Default.Delete, contentDescription = "Eliminar", tint = Color.Red.copy(alpha = 0.7f))
+            Slider(
+                value = layer.opacity,
+                onValueChange = { viewModel.setLayerOpacity(index, it) },
+                valueRange = 0f..1f,
+                modifier = Modifier.weight(1f),
+                colors = SliderDefaults.colors(
+                    thumbColor = NbAccent,
+                    activeTrackColor = NbAccent,
+                    inactiveTrackColor = NbSurface
+                )
+            )
+            Text(
+                text = "${(layer.opacity * 100).roundToInt()}%",
+                style = MaterialTheme.typography.labelSmall,
+                color = NbOnSurfaceMuted,
+                modifier = Modifier.width(36.dp)
+            )
         }
     }
 }
 
-fun Modifier.size(size: androidx.compose.ui.unit.Dp): Modifier = this.then(Modifier.size(size))
+@Composable
+private fun RenameLayerDialog(
+    initialName: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var name by remember { mutableStateOf(initialName) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Renombrar capa") },
+        text = {
+            androidx.compose.material3.OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                singleLine = true
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(name) }) { Text("Aceptar") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancelar") }
+        }
+    )
+}
 
 @Composable
 fun ColorPickerDialog(
@@ -581,22 +761,148 @@ fun ColorPickerDialog(
     initialColor: Color,
     onColorSelected: (Color) -> Unit
 ) {
-    // Implementación simplificada del selector de color
+    val hsv = remember(initialColor) {
+        FloatArray(3).also { AndroidColor.colorToHSV(initialColor.toArgb(), it) }
+    }
+    var hue by remember { mutableFloatStateOf(hsv[0]) }
+    var saturation by remember { mutableFloatStateOf(hsv[1]) }
+    var value by remember { mutableFloatStateOf(hsv[2]) }
+
+    val preview = Color(AndroidColor.HSVToColor(floatArrayOf(hue, saturation, value)))
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Color personalizado") },
         text = {
-            Text("Aquí iría un selector de color más complejo (HSB/RGB).")
+            Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                Brush.horizontalGradient(
+                                    listOf(Color.White, preview)
+                                )
+                            )
+                            .border(1.dp, NbSurfaceLight, RoundedCornerShape(12.dp))
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        text = String.format("#%06X", 0xFFFFFF and preview.toArgb()),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = NbOnSurface
+                    )
+                }
+
+                SaturationValueField(
+                    hue = hue,
+                    saturation = saturation,
+                    value = value,
+                    onSaturationChange = { saturation = it },
+                    onValueChange = { value = it }
+                )
+
+                HueSlider(hue = hue, onHueChange = { hue = it })
+            }
         },
         confirmButton = {
-            Button(onClick = { onColorSelected(Color.Blue) }) {
-                Text("Seleccionar Azul")
-            }
+            TextButton(onClick = { onColorSelected(preview) }) { Text("Usar color") }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancelar")
-            }
+            TextButton(onClick = onDismiss) { Text("Cancelar") }
         }
     )
 }
+
+@Composable
+private fun SaturationValueField(
+    hue: Float,
+    saturation: Float,
+    value: Float,
+    onSaturationChange: (Float) -> Unit,
+    onValueChange: (Float) -> Unit
+) {
+    var fieldSize by remember { mutableStateOf(IntSize.Zero) }
+    val pure = Color(AndroidColor.HSVToColor(floatArrayOf(hue, 1f, 1f)))
+
+    fun update(position: Offset) {
+        if (fieldSize.width == 0 || fieldSize.height == 0) return
+        onSaturationChange((position.x / fieldSize.width).coerceIn(0f, 1f))
+        onValueChange(1f - (position.y / fieldSize.height).coerceIn(0f, 1f))
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(160.dp)
+            .clip(RoundedCornerShape(12.dp))
+            .background(Brush.horizontalGradient(listOf(Color.White, pure)))
+            .onSizeChanged { fieldSize = it }
+            .pointerInput(fieldSize) {
+                detectTapGestures { update(it) }
+            }
+            .pointerInput(fieldSize) {
+                detectDragGestures(onDrag = { change, _ -> update(change.position) })
+            }
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Transparent, Color.Black)
+                    )
+                )
+        )
+        val indicatorX = (saturation * fieldSize.width).roundToInt()
+        val indicatorY = ((1f - value) * fieldSize.height).roundToInt()
+        Box(
+            modifier = Modifier
+                .offset { IntOffset(indicatorX - 10, indicatorY - 10) }
+                .size(20.dp)
+                .border(2.dp, Color.White, CircleShape)
+                .border(1.dp, Color.Black.copy(alpha = 0.4f), CircleShape)
+        )
+    }
+}
+
+@Composable
+private fun HueSlider(hue: Float, onHueChange: (Float) -> Unit) {
+    var sliderWidth by remember { mutableStateOf(IntSize.Zero) }
+    val rainbow = listOf(
+        Color.Red, Color.Yellow, Color.Green, Color.Cyan, Color.Blue,
+        Color.Magenta, Color.Red
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(28.dp)
+            .clip(CircleShape)
+            .background(Brush.horizontalGradient(rainbow))
+            .onSizeChanged { sliderWidth = it }
+            .pointerInput(sliderWidth) {
+                detectTapGestures { onHueChange(horizontalFraction(it.x, sliderWidth.width) * 360f) }
+            }
+            .pointerInput(sliderWidth) {
+                detectDragGestures { change, _ ->
+                    onHueChange(horizontalFraction(change.position.x, sliderWidth.width) * 360f)
+                }
+            }
+    ) {
+        Box(
+            modifier = Modifier
+                .offset { IntOffset((hue / 360f * sliderWidth.width).roundToInt() - 8, 4) }
+                .size(20.dp)
+                .border(2.dp, Color.White, CircleShape)
+                .border(1.dp, Color.Black.copy(alpha = 0.4f), CircleShape)
+        )
+    }
+}
+
+private fun horizontalFraction(x: Float, width: Int): Float =
+    if (width == 0) 0f else (x / width).coerceIn(0f, 1f)

@@ -1,6 +1,5 @@
 package com.mc.nbpaint.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
@@ -15,11 +14,12 @@ private val NbColorScheme = darkColorScheme(
     onSurface = NbOnSurface
 )
 
+/**
+ * NB-paint se usa siempre en oscuro: el contraste alto sobre el lienzo es lo que
+ * hace legible el color real con el que se está pintando.
+ */
 @Composable
-fun NBPaintTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    content: @Composable () -> Unit
-) {
+fun NBPaintTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = NbColorScheme,
         typography = MaterialTheme.typography,

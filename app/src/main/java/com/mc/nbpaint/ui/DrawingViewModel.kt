@@ -33,6 +33,7 @@ import java.util.Date
 import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import kotlin.jvm.JvmName
 import kotlin.random.Random
 
 private const val MAX_HISTORY = 20
@@ -196,6 +197,8 @@ class DrawingViewModel : ViewModel() {
         currentColor = colorArgb
     }
 
+    // El nombre JVM difiere porque `strokeWidth` genera su propio setStrokeWidth(F)V.
+    @JvmName("applyStrokeWidth")
     fun setStrokeWidth(width: Float) {
         strokeWidth = width.coerceIn(2f, 60f)
     }

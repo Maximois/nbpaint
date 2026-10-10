@@ -21,13 +21,16 @@ data class CanvasTransform(val centroid: Offset, val pan: Offset, val zoom: Floa
  */
 suspend fun PointerInputScope.detectCanvasGestures(
     singleFingerPans: Boolean,
+    onGestureStart: () -> Unit,
+    onGestureEnd: () -> Unit,
     onTap: (Offset) -> Unit,
     onDoubleTap: (Offset) -> Unit,
     onDrawStart: (Offset) -> Unit,
     onDrawMove: (Offset) -> Unit,
     onDrawEnd: () -> Unit,
     onTransform: (CanvasTransform) -> Unit,
-    onZoomEnd: (velocity: Offset) -> Unit
+    onZoomEnd: (velocity: Offset) -> Unit,
+    onImageTransform: (CanvasTransform) -> Unit
 ) {
     val touchSlop = viewConfiguration.touchSlop
     val doubleTapTimeout = viewConfiguration.doubleTapTimeoutMillis
@@ -36,6 +39,10 @@ suspend fun PointerInputScope.detectCanvasGestures(
 
     awaitEachGesture {
         val down = awaitFirstDown(requireUnconsumed = false)
+        // El gesto empieza en el primer dedo y termina cuando se levantan todos. Se avisa
+        // aparte de `onDrawStart`/`onDrawEnd` porque aquellos solo cubren el trazo: aquí
+        // interesa todo gesto que toque el lienzo, incluido el pellizco de dos dedos.
+        onGestureStart()
         val velocityTracker = VelocityTracker()
         velocityTracker.addPosition(down.uptimeMillis, down.position)
 
@@ -64,7 +71,11 @@ suspend fun PointerInputScope.detectCanvasGestures(
                 val centroid = midpoint(pressed[0].position, pressed[1].position)
                 val spread = distance(pressed[0].position, pressed[1].position)
                 val zoomChange = if (lastDistance > 0f) spread / lastDistance else 1f
-                onTransform(CanvasTransform(centroid, centroid - lastCentroid, zoomChange))
+                val gesture = CanvasTransform(centroid, centroid - lastCentroid, zoomChange)
+                // Con la herramienta de mover imagen los dos dedos escalan la imagen de la
+                // capa; el resto de las herramientas escalan la vista del lienzo. Quien
+                // decide es onImageTransform, que mira la herramienta activa en el momento.
+                onImageTransform(gesture)
                 lastCentroid = centroid
                 lastDistance = spread
                 previous = centroid
@@ -98,6 +109,7 @@ suspend fun PointerInputScope.detectCanvasGestures(
             previous = position
         }
 
+        onGestureEnd()
         when {
             transformed -> {
                 val v = velocityTracker.calculateVelocity()

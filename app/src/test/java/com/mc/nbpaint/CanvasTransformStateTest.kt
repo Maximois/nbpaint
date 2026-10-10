@@ -162,6 +162,34 @@ class CanvasTransformStateTest {
     }
 
     @Test
+    fun `el visor no se reencuadra a mitad de gesto`() {
+        val s = state()
+
+        // Empieza un arrastre (una selección, por ejemplo) y, mientras el dedo está
+        // apoyado, nace el grupo "Zona" del dock y el visor queda 200 px más bajo.
+        s.beginGesture()
+        s.onViewportSize(IntSize(600, 800))
+
+        // El encuadre NO se puede rehacer todavía: movería la hoja bajo el dedo.
+        assertEquals(1f, s.scale, 0.01f)
+        assertTrue("el visor no debe encogerse aún", s.viewport == IntSize(600, 1000))
+
+        // Al soltar, el tamaño guardado ya entra y el encuadre se recalcula.
+        s.endGesture()
+        assertEquals(0.8f, s.scale, 0.01f)
+        assertTrue(s.viewport == IntSize(600, 800))
+    }
+
+    @Test
+    fun `al soltar sin cambio de tamano no pasa nada`() {
+        val s = state()
+        s.beginGesture()
+        s.endGesture()
+        assertEquals(1f, s.scale, 0.01f)
+        assertEquals(Offset.Zero, s.pan)
+    }
+
+    @Test
     fun `el zoom se mide sobre el encuadre y no sobre el tamano del documento`() {
         val s = CanvasTransformState(CoroutineScope(Dispatchers.Unconfined), viewport)
         s.onViewportSize(viewport)
@@ -176,5 +204,103 @@ class CanvasTransformStateTest {
         repeat(20) { s.applyTransform(CanvasTransform(Offset(300f, 500f), Offset.Zero, 2f)) }
         assertEquals(16f, s.scale, 0.01f)
         assertEquals(800, s.zoomPercent)
+    }
+
+    // ---- Una vista por capa ------------------------------------------------
+
+    @Test
+    fun `cada capa vuelve a la vista que tenia`() {
+        val s = state()
+
+        // En la primera capa se amplía a 3x y se desplaza.
+        s.setActiveLayer(1)
+        s.applyTransform(CanvasTransform(Offset(300f, 500f), Offset(40f, 30f), 3f))
+        val primera = s.scale to s.pan
+
+        // En la segunda, en cambio, se deja como estaba: la vista es de cada capa.
+        s.setActiveLayer(2)
+        assertEquals(1f, s.scale, 0.01f)
+        assertEquals(Offset.Zero, s.pan)
+
+        // Y al volver a la primera aparece tal cual la dejó, sin venir a rastras.
+        s.setActiveLayer(1)
+        assertEquals(primera.first, s.scale, 0.01f)
+        assertEquals(primera.second.x, s.pan.x, 0.01f)
+        assertEquals(primera.second.y, s.pan.y, 0.01f)
+    }
+
+    @Test
+    fun `una capa que no se ha mirado nunca se abre con el documento entero`() {
+        val s = state()
+        s.setActiveLayer(1)
+        s.applyTransform(CanvasTransform(Offset(300f, 500f), Offset.Zero, 4f))
+
+        // Una capa nueva no aparece endurecida en un rincón: se abre a la vista.
+        s.setActiveLayer(2)
+        assertEquals(s.fitScale, s.scale, 0.01f)
+        assertEquals(Offset.Zero, s.pan)
+        assertTrue(!s.isZoomed)
+    }
+
+    @Test
+    fun `la vista de cada capa se guarda con su id y no con su posicion`() {
+        val s = state()
+
+        s.setActiveLayer(7)
+        s.applyTransform(CanvasTransform(Offset(300f, 500f), Offset.Zero, 2f))
+        val conSiete = s.scale
+
+        // Cambiar de capa en la pila es lo de menos: lo que manda es el id.
+        s.setActiveLayer(9)
+        s.setActiveLayer(7)
+        assertEquals(conSiete, s.scale, 0.01f)
+    }
+
+    @Test
+    fun `la vista guardada se acota al cambiar el tamano de la hoja`() {
+        val s = state()
+        s.setActiveLayer(1)
+        s.applyTransform(CanvasTransform(Offset(300f, 500f), Offset(50f, 50f), 4f))
+        val antes = s.pan
+
+        // La hoja crece y el encuadre baja: la vista de la capa no puede quedarse
+        // desplazada a un sitio donde ya no hay nada que mirar.
+        s.onContentSize(IntSize(1200, 2000))
+        s.setActiveLayer(2)
+        s.setActiveLayer(1)
+
+        assertTrue("no puede haber desplazamiento positivo", s.pan.x <= 0.01f)
+        assertTrue("no puede haber desplazamiento positivo", s.pan.y <= 0.01f)
+        assertTrue("tiene que haber cambiado de sitio", s.pan != antes || s.scale < 4f)
+    }
+
+    @Test
+    fun `borrar una capa suelta su vista`() {
+        val s = state()
+        s.setActiveLayer(1)
+        s.applyTransform(CanvasTransform(Offset(300f, 500f), Offset.Zero, 3f))
+        s.setActiveLayer(2)
+
+        // La capa 1 desaparece de la pila.
+        s.retainLayers(setOf(2))
+
+        // Y si algún día vuelve a haber una con ese id, no hereda la vista vieja.
+        s.setActiveLayer(1)
+        assertEquals(s.fitScale, s.scale, 0.01f)
+    }
+
+    @Test
+    fun `cambiar de capa corta la inercia de la vista que se deja`() {
+        val s = state()
+        s.setActiveLayer(1)
+        s.applyTransform(CanvasTransform(Offset(300f, 500f), Offset.Zero, 3f))
+        s.setActiveLayer(2)
+        val alCambiar = s.pan
+
+        // La inercia se había pedido para la capa 1: si siguiera, movería el papel de la 2.
+        s.startInertia(Offset(900f, 900f))
+
+        assertEquals(alCambiar.x, s.pan.x, 0.01f)
+        assertEquals(alCambiar.y, s.pan.y, 0.01f)
     }
 }

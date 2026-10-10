@@ -31,26 +31,25 @@ enum class ImageFilter(val label: String) {
 
     companion object {
         /**
-         * Copia reducida de [bitmap] con el filtro ya aplicado, para mostrar la vista previa
-         * sin pagar el costo de un filtro a resolución completa en cada movimiento del
-         * deslizador.
+         * Aplica [filter] sobre [bitmap] y devuelve el bitmap con el filtro puesto.
+         *
+         * Si el bitmap es mutable se modifica en el lugar y se devuelve el mismo, que es el
+         * camino rápido. Si viene inmutable —pasa con las copias que se hacen al leer un
+         * proyecto— no hay forma de escribirle encima, así que se trabaja sobre una copia
+         * mutable y se devuelve esa. Por eso hay que usar siempre lo que devuelve este
+         * método: ignorarlo dejaría el filtro sin aplicar, en silencio.
          */
-        fun preview(bitmap: Bitmap, filter: ImageFilter, amount: Float, maxSize: Int = 320): Bitmap {
-            val scale = minOf(
-                1f,
-                maxSize.toFloat() / maxOf(bitmap.width, bitmap.height)
-            )
-            val w = (bitmap.width * scale).roundToInt().coerceAtLeast(1)
-            val h = (bitmap.height * scale).roundToInt().coerceAtLeast(1)
-            val small = Bitmap.createScaledBitmap(bitmap, w, h, true)
-            val result = small.copy(Bitmap.Config.ARGB_8888, true)
-            if (small !== result) small.recycle()
-            apply(result, filter, amount)
-            return result
+        fun apply(bitmap: Bitmap, filter: ImageFilter, amount: Float): Bitmap {
+            if (bitmap.isMutable) {
+                applyInPlace(bitmap, filter, amount)
+                return bitmap
+            }
+            val mutable = bitmap.copy(Bitmap.Config.ARGB_8888, true)
+            applyInPlace(mutable, filter, amount)
+            return mutable
         }
 
-        /** Aplica [filter] sobre [bitmap] modifying sus píxeles en el lugar. */
-        fun apply(bitmap: Bitmap, filter: ImageFilter, amount: Float) {
+        private fun applyInPlace(bitmap: Bitmap, filter: ImageFilter, amount: Float) {
             when (filter) {
                 ImageFilter.BLUR -> blur(bitmap, amount)
                 ImageFilter.SHARPNESS -> sharpen(bitmap, amount)

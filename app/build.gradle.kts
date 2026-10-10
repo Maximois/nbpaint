@@ -17,6 +17,11 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        // Sin esto no se ejecutaba ninguna prueba instrumentada: el runner por defecto es el
+        // antiguo, que no entiende las de JUnit, y el resultado era "0 tests" sin fallos, que
+        // es justo lo que hace creer que todo está bien cuando no se ha comprobado nada.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     buildTypes {

@@ -50,13 +50,95 @@ class CanvasTransformState(
     var contentSize by mutableStateOf(IntSize.Zero)
         private set
 
-    var scale by mutableFloatStateOf(1f)
+    /**
+     * La vista que hay guardada de cada capa: su zoom y su desplazamiento.
+     *
+     * Es lo que hace que el lienzo no sea de todos a la vez. Antes había una sola vista para
+     * el documento entero, así que ampliar una capa arrastraba el papel por debajo de las demás
+     * y Pinchar o deshacer en otra capa la traía de vuelta. Guardando la vista por capa, cada
+     * una vuelve a su sitio y a su zoom al volver a ella.
+     *
+     * Se guarda la escala y el desplazamiento tal cual, sin convertirlos a nada relativo al
+     * encuadre: el documento es el mismo para todas las capas, así que un valor absoluto vale
+     * igual en todas, y al cambiar el tamaño de la hoja el encuadre se recalcula por separado.
+     */
+    private val vistaPorCapa = mutableMapOf<Int, Vista>()
+
+    private var capaVista: Int? = null
+
+    var escalaViva by mutableFloatStateOf(1f)
         private set
 
-    var pan by mutableStateOf(Offset.Zero)
+    var panVivo by mutableStateOf(Offset.Zero)
         private set
+
+    /**
+     * Zoom de la capa que se está mirando.
+     *
+     * Cada cambio se guarda en [vistaPorCapa] con la capa que está activa, para que al volver
+     * a ella aparezca como estaba. Es un mapa de un puñado de números y se escribe en cada
+     * paso de la inercia, que va a unas sesenta veces por segundo: es lo bastante barato como
+     * para que la inercia siga siendo igual de suave.
+     */
+    var scale: Float
+        get() = escalaViva
+        private set(value) {
+            escalaViva = value
+            recordarVista()
+        }
+
+    var pan: Offset
+        get() = panVivo
+        private set(value) {
+            panVivo = value
+            recordarVista()
+        }
+
+    private fun recordarVista() {
+        val id = capaVista ?: return
+        vistaPorCapa[id] = Vista(escalaViva, panVivo)
+    }
+
+    /**
+     * Cambia de capa y, con ella, de vista.
+     *
+     * La vista que se tenía se guarda en la capa de la que se sale y se carga la de la que
+     * entra. Una capa nueva, o una que no se ha mirado nunca, se abre con el documento entero
+     * a la vista, que es lo razonable: nadie espera que una capa que no ha visto aparezca
+     * endurescida en un rincón.
+     */
+    fun setActiveLayer(id: Int?) {
+        if (id == capaVista) return
+        // La inercia es de la vista que se está dejando: si siguiera corriendo, movería el
+        // papel de la capa nueva un rato después de haber cambiado.
+        inertiaJob?.cancel()
+        recordarVista()
+        capaVista = id
+        val guardada = id?.let { vistaPorCapa[it] }
+        if (guardada == null) {
+            escalaViva = fitScale
+            panVivo = clampPan(Offset.Zero, escalaViva)
+        } else {
+            escalaViva = guardada.escala.coerceIn(fitScale, fitScale * MAX_ZOOM_FACTOR)
+            panVivo = clampPan(guardada.pan, escalaViva)
+        }
+    }
 
     private var inertiaJob: Job? = null
+
+    /**
+     * Hay un gesto del dedo en curso (un trazo, un arrastre o el trazo de una selección).
+     *
+     * El visor cambia de tamaño a mitad de gesto cada vez que un grupo del dock aparece o
+     * se va: al empezar a arrastrar una selección nace el grupo "Zona" y el lienzo se
+     * encoge. Si el encuadre se rehiciera en ese momento, la hoja se movería bajo el dedo
+     * y el rectángulo aterrizaría donde no se arrastró, con el tamaño deformado. Por eso
+     * el tamaño nuevo se guarda y entra al soltar.
+     */
+    var gestureActive by mutableStateOf(false)
+        private set
+
+    private var pendingViewport: IntSize? = null
 
     val isZoomed: Boolean get() = scale > fitScale * 1.01f
 
@@ -87,6 +169,11 @@ class CanvasTransformState(
      * acotan los límites del arrastre.
      */
     fun onViewportSize(size: IntSize) {
+        if (gestureActive) {
+            // Un dedo ya está apoyado: se aplica al soltar, no ahora. Ver `gestureActive`.
+            pendingViewport = size
+            return
+        }
         // El encuadre anterior decide si reencuadrar: hay que compararlo contra la escala
         // que se tenía antes de cambiar el visor, no contra el nuevo.
         val wasAtFit = scale <= fitScale * 1.01f
@@ -97,6 +184,23 @@ class CanvasTransformState(
         } else {
             pan = clampPan(pan, scale)
         }
+    }
+
+    /** Empieza un gesto del dedo: a partir de aquí el visor no se reencuadra solo. */
+    fun beginGesture() {
+        gestureActive = true
+    }
+
+    /**
+     * Cierra el gesto y, si el visor cambió de tamaño mientras duraba, aplica el tamaño
+     * guardado. Se aplica después de soltar y no antes: en ese momento ya no hay un dedo
+     * abajo que pueda notar el salto.
+     */
+    fun endGesture() {
+        gestureActive = false
+        val pendiente = pendingViewport ?: return
+        pendingViewport = null
+        onViewportSize(pendiente)
     }
 
     fun onContentSize(size: IntSize) {
@@ -206,6 +310,23 @@ class CanvasTransformState(
         inertiaJob?.cancel()
         scale = fitScale
         pan = clampPan(Offset.Zero, scale)
+    }
+
+    /** La vista guardada de una capa: su zoom y su desplazamiento. */
+    private data class Vista(val escala: Float, val pan: Offset)
+
+    /**
+     * Olvida las vistas de las capas que ya no están, y se queda con [vivas].
+     *
+     * Sin esto, borrar una capa dejaría su vista guardada para siempre. Es poco —dos
+     * números por capa—, pero una sesión larga con muchas capas borradas lo acumularía
+     * sin que nada lo limpiara.
+     */
+    fun retainLayers(vivas: Set<Int>) {
+        val huerfanas = vistaPorCapa.keys - vivas
+        if (huerfanas.isEmpty()) return
+        huerfanas.forEach { vistaPorCapa.remove(it) }
+        if (capaVista !in vivas) setActiveLayer(vivas.firstOrNull())
     }
 }
 
